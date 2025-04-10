@@ -1,0 +1,9 @@
+*.csv
+*.json
+*.xml
+outputs
+bioasq
+/data/medquad
+*.yaml
+venv
+*.pyc
