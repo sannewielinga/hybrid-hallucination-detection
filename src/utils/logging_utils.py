@@ -28,7 +28,7 @@ def setup_logger(log_level=logging.INFO, log_file=None):
             log_path = Path(log_file)
             log_path.parent.mkdir(
                 parents=True, exist_ok=True
-            )  # Ensure directory exists
+            )
             file_handler = logging.FileHandler(log_path, mode="a")
             file_handler.setLevel(log_level)
             file_handler.setFormatter(

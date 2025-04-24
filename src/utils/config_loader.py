@@ -5,7 +5,16 @@ import os
 
 
 def load_config(config_path):
-    """Loads and validates a YAML config file."""
+    """
+    Loads a configuration from a YAML file.
+
+    Args:
+        config_path (str): Path to the YAML configuration file.
+
+    Returns:
+        dict: The loaded configuration as a dictionary, or None if the file
+        does not exist, is not a valid YAML file, or there is an error loading it.
+    """
     path = Path(config_path)
     if not path.is_file():
         logging.error(f"Configuration file not found: {path}")
@@ -14,10 +23,7 @@ def load_config(config_path):
         with open(path, "r") as f:
             config = yaml.safe_load(f)
         logging.info(f"Loaded configuration from: {path}")
-        # Add basic validation if needed (e.g., check for required keys)
         validate_config(config)
-        # Expand environment variables if used (optional)
-        # config = expand_env_vars(config)
         return config
     except yaml.YAMLError as e:
         logging.error(f"Error parsing YAML file {path}: {e}")
@@ -28,7 +34,22 @@ def load_config(config_path):
 
 
 def validate_config(config):
-    """Basic validation of the loaded config dictionary."""
+    """
+    Validates that the given configuration dictionary has the required keys
+    and that the values are of the correct type.
+
+    Required keys:
+
+    - run_id: str
+    - stages: dict
+    - dataset: str
+    - model_name: str
+    - base_output_dir: str
+
+    Raises:
+    - ValueError: If any of the required keys are missing or if their values
+      are of the wrong type.
+    """
     required_keys = ["run_id", "stages", "dataset", "model_name", "base_output_dir"]
     missing_keys = [key for key in required_keys if key not in config]
     if missing_keys:
@@ -41,7 +62,19 @@ def validate_config(config):
 
 
 def expand_env_vars(config):
-    """Recursively expands environment variables in config values."""
+    """
+    Recursively expands environment variables within a given configuration.
+
+    Args:
+        config (Union[dict, list, str]): The configuration data which may contain
+        environment variables to be expanded. It can be a dictionary, list, 
+        or string.
+
+    Returns:
+        Union[dict, list, str]: The configuration data with environment 
+        variables expanded. The structure of the input is preserved.
+    """
+
     if isinstance(config, dict):
         return {k: expand_env_vars(v) for k, v in config.items()}
     elif isinstance(config, list):

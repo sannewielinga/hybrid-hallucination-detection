@@ -1,13 +1,11 @@
-"""Compute overall performance metrics from predicted uncertainties."""
-
 import argparse
 import functools
 import logging
 import os
 import pickle
-
+import json
+from pathlib import Path
 import numpy as np
-import wandb
 
 from src.utils import utils
 from src.utils.eval_utils import (
@@ -18,54 +16,54 @@ from src.utils.eval_utils import (
     area_under_thresholded_accuracy,
 )
 
-
-utils.setup_logger()
-
-result_dict = {}
-
-UNC_MEAS = "uncertainty_measures.pkl"
-
-
-def init_wandb(wandb_runid, assign_new_wandb_id, experiment_lot, entity):
-    """Initialize wandb session."""
-    user = os.environ["USER"]
-    slurm_jobid = os.getenv("SLURM_JOB_ID")
-    scratch_dir = os.getenv("SCRATCH_DIR", ".")
-    kwargs = dict(
-        entity=entity,
-        project="semantic_uncertainty",
-        dir=f"{scratch_dir}/{user}/uncertainty",
-        notes=f"slurm_id: {slurm_jobid}, experiment_lot: {experiment_lot}",
+try:
+    utils.setup_logger()
+except AttributeError:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
     )
-    if not assign_new_wandb_id:
-        wandb.init(id=wandb_runid, resume=True, **kwargs)
-        wandb.restore(UNC_MEAS)
-    else:
-        api = wandb.Api()
-        wandb.init(**kwargs)
 
-        old_run = api.run(f"{entity}/semantic_uncertainty/{wandb_runid}")
-        old_run.file(UNC_MEAS).download(
-            replace=True, exist_ok=False, root=wandb.run.dir
-        )
+UNC_MEAS = "uncertainty_measures.pkl" 
 
 
 def analyze_run(
-    wandb_runid,
-    assign_new_wandb_id=False,
+    input_dir,
     answer_fractions_mode="default",
-    experiment_lot=None,
-    entity=None,
+    output_json_path=None
 ):
-    """Analyze the uncertainty measures for a given wandb run id."""
-    logging.info("Analyzing wandb_runid `%s`.", wandb_runid)
+    """
+    Analyze the uncertainty measures from a run directory and compute performance metrics.
+
+    This function will load the uncertainty measures from a specified directory and compute
+    various performance metrics, including AUROC, accuracy at different answer fractions,
+    and mean uncertainty. The results will be logged and optionally saved to a JSON file.
+
+    Args:
+        input_dir (str): Path to the directory containing the uncertainty measures (output of
+            uncertainty_measures.py).
+        answer_fractions_mode (str, optional): One of "default" (default answer fractions) or
+            "finegrained" (answer fractions from 0 to 1 in increments of 0.05). Defaults to "default".
+        output_json_path (str, optional): Path to save the analysis results to a JSON file. If not
+            specified, results will only be logged.
+
+    Returns:
+        dict: A dictionary containing the analysis results, with keys "performance" and
+            "uncertainty". The "performance" key contains a dictionary with keys for each
+            performance metric, and the "uncertainty" key contains a dictionary with keys for
+            each uncertainty measure and the corresponding performance metrics.
+    """
+    run_id = Path(input_dir).name
+    logging.info(f"Analyzing run ID '{run_id}' from input directory: {input_dir}")
 
     if answer_fractions_mode == "default":
         answer_fractions = [0.8, 0.9, 0.95, 1.0]
     elif answer_fractions_mode == "finegrained":
         answer_fractions = [round(i, 3) for i in np.linspace(0, 1, 20 + 1)]
     else:
-        raise ValueError
+        logging.error(f"Invalid answer_fractions_mode: {answer_fractions_mode}")
+        raise ValueError("Invalid answer_fractions_mode")
 
     rng = np.random.default_rng(41)
     eval_metrics = dict(
@@ -86,126 +84,217 @@ def analyze_run(
             compatible_bootstrap,
         ]
 
-    if wandb.run is None:
-        init_wandb(
-            wandb_runid,
-            assign_new_wandb_id=assign_new_wandb_id,
-            experiment_lot=experiment_lot,
-            entity=entity,
-        )
+    input_dir_path = Path(input_dir)
+    uncertainty_file_path = input_dir_path / UNC_MEAS
 
-    elif wandb.run.id != wandb_runid:
-        raise ValueError
+    if not uncertainty_file_path.is_file():
+        logging.error(f"Uncertainty file not found at: {uncertainty_file_path}")
+        raise FileNotFoundError(f"Required file not found: {uncertainty_file_path}")
 
-    with open(f"{wandb.run.dir}/{UNC_MEAS}", "rb") as file:
-        results_old = pickle.load(file)
+    logging.info(f"Loading uncertainty data from: {uncertainty_file_path}")
+    try:
+        with open(uncertainty_file_path, "rb") as file:
+            results_old = pickle.load(file)
+    except Exception as e:
+        logging.error(f"Failed to load pickle file {uncertainty_file_path}: {e}")
+        raise
 
     result_dict = {"performance": {}, "uncertainty": {}}
 
+    if "validation_is_false" not in results_old:
+        logging.error(f"'validation_is_false' key not found in {uncertainty_file_path}. Cannot compute performance.")
+        return result_dict
+
     all_accuracies = dict()
-    all_accuracies["accuracy"] = 1 - np.array(results_old["validation_is_false"])
+    validation_is_false_gt = np.array(results_old["validation_is_false"])
+    all_accuracies["accuracy"] = 1 - validation_is_false_gt
 
     for name, target in all_accuracies.items():
         result_dict["performance"][name] = {}
-        result_dict["performance"][name]["mean"] = np.mean(target)
-        result_dict["performance"][name]["bootstrap"] = bootstrap(np.mean, rng)(target)
+        mean_acc = np.mean(target)
+        result_dict["performance"][name]["mean"] = mean_acc
+        if np.var(target) > 0 and len(np.unique(target)) > 1:
+             result_dict["performance"][name]["bootstrap"] = bootstrap(np.mean, rng)(target)
+        else:
+             result_dict["performance"][name]["bootstrap"] = {"std_err": 0, "low": mean_acc, "high": mean_acc}
+             logging.warning(f"Skipping bootstrap for '{name}' due to constant values or single class.")
 
-    rum = results_old["uncertainty_measures"]
+    rum = results_old.get("uncertainty_measures", {})
+    if not rum:
+        logging.warning(f"No 'uncertainty_measures' found in {uncertainty_file_path}. Skipping uncertainty analysis.")
+        return result_dict
+
     if "p_false" in rum and "p_false_fixed" not in rum:
-        rum["p_false_fixed"] = [1 - np.exp(1 - x) for x in rum["p_false"]]
+        logging.info("Calculating 'p_false_fixed' from 'p_false'.")
+        p_false_fixed_list = []
+        for x in rum["p_false"]:
+            try:
+                if x is not None and not np.isnan(x):
+                    val = 1 - np.exp(1 - float(x))
+                    p_false_fixed_list.append(val)
+                else:
+                    p_false_fixed_list.append(np.nan)
+            except (TypeError, ValueError):
+                p_false_fixed_list.append(np.nan)
+        rum["p_false_fixed"] = p_false_fixed_list
 
-    for measure_name, measure_values in rum.items():
-        logging.info("Computing for uncertainty measure `%s`.", measure_name)
+    ground_truths = {"": validation_is_false_gt}
+    if "validation_unanswerable" in results_old:
+        ground_truths["_UNANSWERABLE"] = np.array(results_old["validation_unanswerable"])
 
-        validation_is_falses = [
-            results_old["validation_is_false"],
-            results_old["validation_unanswerable"],
-        ]
+    for measure_name, measure_values_raw in rum.items():
+        logging.info(f"Computing metrics for uncertainty measure: '{measure_name}'")
 
-        logging_names = ["", "_UNANSWERABLE"]
+        try:
+            measure_values = np.array(measure_values_raw, dtype=float)
+        except (ValueError, TypeError) as e:
+            logging.warning(f"Could not convert measure values for '{measure_name}' to float array: {e}. Skipping this measure.")
+            continue
 
-        for validation_is_false, logging_name in zip(
-            validation_is_falses, logging_names
-        ):
-            name = measure_name + logging_name
-            result_dict["uncertainty"][name] = {}
+        if np.isnan(measure_values).all():
+            logging.warning(f"All values for '{measure_name}' are NaN. Skipping metric calculation.")
+            continue
 
-            validation_is_false = np.array(validation_is_false)
-            validation_accuracy = 1 - validation_is_false
-            if len(measure_values) > len(validation_is_false):
-                if "p_false" not in measure_name:
-                    raise ValueError
+        for gt_suffix, validation_is_false in ground_truths.items():
+            current_measure_name_log = measure_name + gt_suffix
+            result_dict["uncertainty"][current_measure_name_log] = {}
+
+            min_len = min(len(measure_values), len(validation_is_false))
+            if len(measure_values) != len(validation_is_false):
                 logging.warning(
-                    "More measure values for %s than in validation_is_false. Len(measure values): %d, Len(validation_is_false): %d",
-                    measure_name,
-                    len(measure_values),
-                    len(validation_is_false),
+                    f"Length mismatch for '{current_measure_name_log}'. "
+                    f"Scores: {len(measure_values)}, Ground Truth: {len(validation_is_false)}. "
+                    f"Using first {min_len} aligned samples for metric calculation."
                 )
-                measure_values = measure_values[: len(validation_is_false)]
+            aligned_measure_values = measure_values[:min_len]
+            aligned_validation_is_false = validation_is_false[:min_len]
+            aligned_validation_accuracy = 1 - aligned_validation_is_false
+
+            valid_indices = ~np.isnan(aligned_measure_values)
+            final_scores = aligned_measure_values[valid_indices]
+            final_is_false = aligned_validation_is_false[valid_indices]
+            final_accuracy = aligned_validation_accuracy[valid_indices]
+
+            if len(final_scores) < 2 or len(np.unique(final_is_false)) < 2:
+                 logging.warning(f"Not enough valid data points or only one class present for '{current_measure_name_log}' after NaN removal/alignment. Skipping metric calculations.")
+                 continue
 
             fargs = {
-                "AUROC": [validation_is_false, measure_values],
-                "area_under_thresholded_accuracy": [
-                    validation_accuracy,
-                    measure_values,
-                ],
-                "mean_uncertainty": [measure_values],
+                "AUROC": [final_is_false, final_scores],
+                "area_under_thresholded_accuracy": [final_accuracy, final_scores],
+                "mean_uncertainty": [final_scores],
             }
 
             for answer_fraction in answer_fractions:
                 fargs[f"accuracy_at_{answer_fraction}_answer_fraction"] = [
-                    validation_accuracy,
-                    measure_values,
+                    final_accuracy,
+                    final_scores,
                 ]
 
             for fname, (function, bs_function) in eval_metrics.items():
-                metric_i = function(*fargs[fname])
-                result_dict["uncertainty"][name][fname] = {}
-                result_dict["uncertainty"][name][fname]["mean"] = metric_i
-                logging.info("%s for measure name `%s`: %f", fname, name, metric_i)
-                result_dict["uncertainty"][name][fname]["bootstrap"] = bs_function(
-                    function, rng
-                )(*fargs[fname])
+                if fname != "mean_uncertainty" and len(np.unique(final_is_false)) < 2:
+                    logging.warning(f"Skipping {fname} for '{current_measure_name_log}' due to single class ground truth.")
+                    metric_i = np.nan
+                    bs_results = {"std_err": np.nan, "low": np.nan, "high": np.nan}
+                else:
+                    try:
+                        metric_i = function(*fargs[fname])
 
-    wandb.log(result_dict)
-    logging.info(
-        "Analysis for wandb_runid `%s` finished. Full results dict: %s",
-        wandb_runid,
-        result_dict,
-    )
+                        score_variance = np.var(fargs[fname][-1])
+                        gt_variance = np.var(fargs[fname][0]) if len(fargs[fname]) > 1 else 1
+
+                        can_bootstrap = score_variance > 0
+                        if fname != "mean_uncertainty":
+                             can_bootstrap &= (gt_variance > 0)
+
+                        if can_bootstrap:
+                            bs_results = bs_function(function, rng)(*fargs[fname])
+                        else:
+                            logging.warning(f"Skipping bootstrap for {fname} on '{current_measure_name_log}' due to zero variance in scores or ground truth.")
+                            bs_results = {"std_err": 0, "low": metric_i, "high": metric_i}
+
+                    except ValueError as ve:
+                        logging.warning(f"Could not calculate {fname} for '{current_measure_name_log}': {ve}. Setting to NaN.")
+                        metric_i = np.nan
+                        bs_results = {"std_err": np.nan, "low": np.nan, "high": np.nan}
+                    except Exception as e:
+                        logging.error(f"Unexpected error calculating {fname} for '{current_measure_name_log}': {e}", exc_info=True)
+                        metric_i = np.nan
+                        bs_results = {"std_err": np.nan, "low": np.nan, "high": np.nan}
+
+
+                result_dict["uncertainty"][current_measure_name_log][fname] = {}
+                result_dict["uncertainty"][current_measure_name_log][fname]["mean"] = metric_i
+                result_dict["uncertainty"][current_measure_name_log][fname]["bootstrap"] = bs_results
+                logging.info(f"  Metric {fname}: {metric_i:.4f}")
+
+
+    logging.info(f"\n--- Analysis Results for Run ID: {run_id} ---")
+    try:
+        results_json_str = json.dumps(result_dict, indent=2, default=lambda x: str(x) if isinstance(x, (np.ndarray, np.generic)) else x)
+        logging.info(results_json_str)
+    except TypeError as e:
+        logging.error(f"Could not serialize results dictionary to JSON: {e}")
+        logging.info(f"Raw results dictionary: {result_dict}")
+
+    if output_json_path:
+        output_file = Path(output_json_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(output_file, 'w') as f:
+                f.write(results_json_str)
+            logging.info(f"Saved analysis results to: {output_file}")
+        except Exception as e:
+            logging.error(f"Failed to save analysis results JSON to {output_file}: {e}")
+
+    logging.info(f"--- Analysis finished for Run ID: {run_id} ---")
+    return result_dict
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Compute overall performance metrics from predicted uncertainties stored in a pkl file."
+    )
     parser.add_argument(
-        "--wandb_runids",
-        nargs="+",
+        "--input_dir",
         type=str,
-        help="Wandb run ids of the datasets to evaluate on.",
+        required=True,
+        help="Path to the directory containing the 'uncertainty_measures.pkl' file for the run.",
     )
     parser.add_argument(
-        "--assign_new_wandb_id", default=True, action=argparse.BooleanOptionalAction
+        "--answer_fractions_mode",
+         type=str,
+         default="default",
+         choices=["default", "finegrained"],
+         help="Granularity for accuracy_at_quantile calculations."
     )
-    parser.add_argument("--answer_fractions_mode", type=str, default="default")
+    parser.add_argument(
+        "--output_json",
+        type=str,
+        default=None,
+        help="Optional path to save the final results dictionary as a JSON file."
+    )
     parser.add_argument(
         "--experiment_lot",
         type=str,
-        default="Unnamed Experiment",
-        help="Keep default wandb clean.",
+        default="Unnamed Analysis",
+        help="A label for the analysis run (optional).",
     )
-    parser.add_argument("--entity", type=str, help="Wandb entity.")
 
     args, unknown = parser.parse_known_args()
     if unknown:
-        raise ValueError(f"Unkown args: {unknown}")
+        logging.warning(f"Ignoring unknown args: {unknown}")
 
-    wandb_runids = args.wandb_runids
-    for wid in wandb_runids:
-        logging.info("Evaluating wandb_runid `%s`.", wid)
+    logging.info(f"Starting analysis for directory: {args.input_dir}")
+    try:
         analyze_run(
-            wid,
-            args.assign_new_wandb_id,
-            args.answer_fractions_mode,
-            experiment_lot=args.experiment_lot,
-            entity=args.entity,
+            input_dir=args.input_dir,
+            answer_fractions_mode=args.answer_fractions_mode,
+            output_json_path=args.output_json
         )
+    except FileNotFoundError:
+        logging.error(f"Analysis failed: Input file not found for directory {args.input_dir}")
+    except Exception as e:
+        logging.error(f"Analysis failed for directory {args.input_dir}: {e}", exc_info=True)
+
+    logging.info("Analysis script finished.")

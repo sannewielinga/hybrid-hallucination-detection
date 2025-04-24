@@ -22,6 +22,12 @@ from .compute_se import main as main_compute
 
 
 def generate_answers(args):
+    """
+    Main entry point for generating answers with a given model and dataset.
+
+    :param args: The parsed arguments from the command line.
+    :return: None
+    """
     logging_utils.setup_logger()
     logging.info(f"Starting answer generation with args: {args}")
 
@@ -94,7 +100,7 @@ def generate_answers(args):
     p_true_few_shot_prompt = None
     if args.compute_p_true:
         logging.info("Constructing few-shot prompt for P(True)...")
-        available_for_ptrue = list(set(remaining_answerable))  # Copy
+        available_for_ptrue = list(set(remaining_answerable))
         if not available_for_ptrue:
             logging.warning(
                 "No remaining answerable indices for P(True) few-shot prompt. Skipping P(True) calculation."

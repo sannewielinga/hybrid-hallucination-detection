@@ -7,3 +7,6 @@ bioasq
 *.yaml
 venv
 *.pyc
+*.txt
+
+src/utils/annotate_helper.py

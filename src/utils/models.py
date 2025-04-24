@@ -328,7 +328,6 @@ class HuggingfaceModel(BaseModel):
         self.token_limit = 4096 if "Llama-2" in model_name else 2048
 
     def predict(self, input_data, temperature, top_p, return_full=False):
-
         inputs = self.tokenizer(input_data, return_tensors="pt").to("cuda")
 
         if (

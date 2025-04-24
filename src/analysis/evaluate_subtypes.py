@@ -6,6 +6,9 @@ from scipy import stats
 import argparse
 import logging
 from pathlib import Path
+from sklearn.metrics import auc
+from src.utils.eval_utils import aurac, rejection_accuracy_curve
+
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -14,7 +17,6 @@ plt.style.use("seaborn-v0_8-darkgrid")
 
 
 def save_plot(figure, filepath):
-    """Saves the current figure and closes it."""
     try:
         figure.savefig(filepath, bbox_inches="tight", dpi=150)
         logging.info(f"Plot saved to: {filepath}")
@@ -31,7 +33,6 @@ def perform_subtype_analysis(
     plot_dir=None,
     save_plots=False,
 ):
-    """Performs and prints subtype analysis for a given score column."""
 
     logging.info(
         f"\n--- Analyzing Score Column: '{score_column}' for Run: {run_id} ---"
@@ -58,6 +59,8 @@ def perform_subtype_analysis(
         y=score_column,
         ax=ax_type,
         palette="viridis",
+        hue="hallucination_type",
+        legend=False
     )
     sns.stripplot(
         data=df_annotated,
@@ -87,7 +90,49 @@ def perform_subtype_analysis(
             )
         plt.close(fig_type)
 
-    # --- Plotting vs. Hallucination SUBTYPE ---
+    valid_annotations_mask = ~df_annotated['hallucination_type'].isin(['Annotation_Failed', 'Unknown'])
+    df_aurac_analysis = df_annotated[valid_annotations_mask].copy()
+    df_aurac_analysis = df_aurac_analysis[df_aurac_analysis['hallucination_type'] != 'Other/Unclear'].copy()
+    df_aurac_analysis['is_correct_manual'] = ~df_aurac_analysis['hallucination_type'].isin(['Factuality', 'Faithfulness'])
+
+    print(f"\n--- AURAC Calculation for '{score_column}' on Annotated Subset (n={len(df_aurac_analysis)}) ---")
+    if not df_aurac_analysis.empty:
+        y_true_correct = df_aurac_analysis['is_correct_manual'].values
+        y_score_uncertainty = df_aurac_analysis[score_column].values
+
+        valid_metric_mask = ~np.isnan(y_true_correct) & ~np.isnan(y_score_uncertainty)
+        if np.sum(valid_metric_mask) > 1:
+            aurac_score = aurac(y_true_correct[valid_metric_mask], y_score_uncertainty[valid_metric_mask])
+            print(f"AURAC Score: {aurac_score:.4f}")
+
+            if save_plots and plot_dir:
+                fractions, accuracies = rejection_accuracy_curve(
+                    y_true_correct[valid_metric_mask], y_score_uncertainty[valid_metric_mask]
+                )
+                fig_rej, ax_rej = plt.subplots(figsize=(8, 6))
+                plot_mask = ~np.isnan(accuracies)
+                if np.any(plot_mask):
+                    ax_rej.plot(fractions[plot_mask], accuracies[plot_mask], marker='o', linestyle='-')
+                    ax_rej.set_title(f'Rejection Accuracy Curve for {score_column} (Run: {run_id})')
+                    ax_rej.set_xlabel('Fraction of Samples Rejected (Based on Score)')
+                    ax_rej.set_ylabel('Accuracy of Accepted Samples')
+                    ax_rej.grid(True, linestyle='--')
+                    min_acc_plot = np.nanmin(accuracies[plot_mask])
+                    ax_rej.set_ylim(bottom=min(0.5, min_acc_plot - 0.05) if not np.isnan(min_acc_plot) else 0.5, top=1.05)
+                    ax_rej.text(0.05, 0.1, f'AURAC = {aurac_score:.4f}', transform=ax_rej.transAxes,
+                                bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
+                    plot_filename_rej = plot_dir / f"{run_id}_{score_column}_RejectionCurve.png"
+                    save_plot(fig_rej, plot_filename_rej)
+                else:
+                     logging.warning(f"No valid accuracy points to plot rejection curve for {score_column}.")
+                     plt.close(fig_rej)
+
+        else:
+            print("AURAC Score: Not calculable (insufficient valid data).")
+    else:
+        print("AURAC Score: Not calculable (no valid annotated samples).")
+
+
     logging.info(
         f"\nFiltering subtypes with at least {min_samples_per_subtype} samples for plotting/stats..."
     )
@@ -111,6 +156,8 @@ def perform_subtype_analysis(
             order=order,
             ax=ax_subtype,
             palette="viridis",
+            hue="hallucination_subtype",
+            legend=False,
         )
         ax_subtype.set_title(
             f"{score_column} Distribution by Hallucination Subtype (Run: {run_id}, n >= {min_samples_per_subtype})"
@@ -158,37 +205,38 @@ def perform_subtype_analysis(
             f"Skipping subtype summary statistics due to insufficient data or NaN scores in '{score_column}'."
         )
 
-    subtype1 = "Factuality_Other"
-    subtype2 = "A3_DiagnosticCriteriaDefinition"
+    category1 = "Factuality"
+    category2 = "Faithfulness"
     print(
-        f"\n--- Mann-Whitney U test comparing {score_column} for '{subtype1}' vs '{subtype2}' ---"
+        f"\n--- Mann-Whitney U test comparing {score_column} for '{category1}' vs '{category2}' ---"
     )
+    print(f"--- Justification: Comparing grouped primary hallucination categories to maximize power ---")
 
-    df_testable = df_plot_subtype.dropna(subset=[score_column])
+    df_testable_cat = df_annotated[
+        df_annotated['hallucination_type'].isin([category1, category2])
+    ].dropna(subset=[score_column])
 
     if (
-        subtype1 in df_testable["hallucination_subtype"].unique()
-        and subtype2 in df_testable["hallucination_subtype"].unique()
+        category1 in df_testable_cat["hallucination_type"].unique()
+        and category2 in df_testable_cat["hallucination_type"].unique()
     ):
-        scores_subtype1 = df_testable[df_testable["hallucination_subtype"] == subtype1][
+        scores_category1 = df_testable_cat[df_testable_cat["hallucination_type"] == category1][
             score_column
         ]
-        scores_subtype2 = df_testable[df_testable["hallucination_subtype"] == subtype2][
+        scores_category2 = df_testable_cat[df_testable_cat["hallucination_type"] == category2][
             score_column
         ]
 
-        if (
-            len(scores_subtype1) > 0
-            and len(scores_subtype2) > 0
-            and np.var(scores_subtype1) > 0
-            and np.var(scores_subtype2) > 0
-        ):
+        n1, n2 = len(scores_category1), len(scores_category2)
+        var1, var2 = np.var(scores_category1), np.var(scores_category2)
+
+        if (n1 > 1 and n2 > 1 and var1 > 0 and var2 > 0):
             try:
                 stat, p_value = stats.mannwhitneyu(
-                    scores_subtype1, scores_subtype2, alternative="two-sided"
+                    scores_category1, scores_category2, alternative="two-sided"
                 )
                 print(
-                    f"Comparing {len(scores_subtype1)} samples vs {len(scores_subtype2)} samples."
+                    f"Comparing {n1} samples ({category1}) vs {n2} samples ({category2})."
                 )
                 print(f"Statistic: {stat:.3f}, P-value: {p_value:.4f}")
                 if p_value < 0.05:
@@ -196,18 +244,65 @@ def perform_subtype_analysis(
                 else:
                     print("Result: No statistically significant difference (p >= 0.05)")
             except ValueError as e:
-                print(
-                    f"Could not perform Mann-Whitney U test (e.g., identical data): {e}"
-                )
+                print(f"Could not perform Mann-Whitney U test: {e}")
         else:
-            print(
-                f"Skipping test: Not enough samples or zero variance in one or both groups ({subtype1}: n={len(scores_subtype1)}, var={np.var(scores_subtype1):.2E}; {subtype2}: n={len(scores_subtype2)}, var={np.var(scores_subtype2):.2E})."
-            )
-
+            print(f"Skipping test: Insufficient samples or zero variance. "
+                  f"'{category1}': n={n1}, var={var1:.2E}; "
+                  f"'{category2}': n={n2}, var={var2:.2E}.")
     else:
-        print(
-            f"Skipping test: One or both subtypes ('{subtype1}', '{subtype2}') not found in filtered data or had only NaN scores."
-        )
+        missing = []
+        if category1 not in df_testable_cat["hallucination_type"].unique(): missing.append(category1)
+        if category2 not in df_testable_cat["hallucination_type"].unique(): missing.append(category2)
+        print(f"Skipping test: One or both categories ({', '.join(missing)}) not found in data.")
+
+
+    subtype1 = "A3_DiagnosticCriteriaDefinition"
+    subtype2 = "B1_ExtrapolationAddition"
+    print(
+        f"\n--- Mann-Whitney U test comparing {score_column} for '{subtype1}' vs '{subtype2}' ---"
+    )
+    print(f"--- Justification: Comparing the two most frequent subtypes (Factuality vs. Faithfulness) ---")
+
+    df_testable_sub = df_plot_subtype.dropna(subset=[score_column])
+
+    if (
+        subtype1 in df_testable_sub["hallucination_subtype"].unique()
+        and subtype2 in df_testable_sub["hallucination_subtype"].unique()
+    ):
+        scores_subtype1 = df_testable_sub[df_testable_sub["hallucination_subtype"] == subtype1][
+            score_column
+        ]
+        scores_subtype2 = df_testable_sub[df_testable_sub["hallucination_subtype"] == subtype2][
+            score_column
+        ]
+
+        n1, n2 = len(scores_subtype1), len(scores_subtype2)
+        var1, var2 = np.var(scores_subtype1), np.var(scores_subtype2)
+
+        if (n1 > 1 and n2 > 1 and var1 > 0 and var2 > 0):
+            try:
+                stat, p_value = stats.mannwhitneyu(
+                    scores_subtype1, scores_subtype2, alternative="two-sided"
+                )
+                print(
+                    f"Comparing {n1} samples ({subtype1}) vs {n2} samples ({subtype2})."
+                )
+                print(f"Statistic: {stat:.3f}, P-value: {p_value:.4f}")
+                if p_value < 0.05:
+                    print("Result: Statistically significant difference (p < 0.05)")
+                else:
+                    print("Result: No statistically significant difference (p >= 0.05)")
+            except ValueError as e:
+                print(f"Could not perform Mann-Whitney U test: {e}")
+        else:
+            print(f"Skipping test: Insufficient samples or zero variance. "
+                  f"'{subtype1}': n={n1}, var={var1:.2E}; "
+                  f"'{subtype2}': n={n2}, var={var2:.2E}.")
+    else:
+        missing = []
+        if subtype1 not in df_testable_sub["hallucination_subtype"].unique(): missing.append(subtype1)
+        if subtype2 not in df_testable_sub["hallucination_subtype"].unique(): missing.append(subtype2)
+        print(f"Skipping test: One or both subtypes ({', '.join(missing)}) not found in filtered data (n >= {min_samples_per_subtype}).")
 
 
 def main():
@@ -229,7 +324,7 @@ def main():
         type=str,
         nargs="+",
         default=["semantic_entropy"],
-        help="List of score column names to analyze (e.g., semantic_entropy internal_signal_score hybrid_0.5_0.5).",
+        help="List of score column names to analyze (e.g., semantic_entropy internal_signal_score hybrid_simple_score).",
     )
     parser.add_argument(
         "--min_samples",

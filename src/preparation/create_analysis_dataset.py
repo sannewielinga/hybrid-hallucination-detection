@@ -4,320 +4,243 @@ import pickle
 import logging
 import numpy as np
 from pathlib import Path
+from sklearn.preprocessing import MinMaxScaler
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def load_pickle(filepath):
-    """Loads a pickle file."""
+    """
+    Loads a pickle file. If the file is not found or there is an error, return None.
+    
+    Parameters
+    ----------
+    filepath : str
+        The path to the pickle file.
+    
+    Returns
+    -------
+    data : object
+        The loaded pickle file.
+    """
     filepath = Path(filepath)
-    if not filepath.is_file():
-        logging.error(f"Pickle file not found: {filepath}")
-        return None
+    if not filepath.is_file(): logging.error(f"Pickle file not found: {filepath}"); return None
     try:
-        with open(filepath, "rb") as f:
-            data = pickle.load(f)
-        logging.info(f"Successfully loaded {filepath}")
-        return data
-    except Exception as e:
-        logging.error(f"Error loading pickle file {filepath}: {e}")
-        return None
+        with open(filepath, "rb") as f: data = pickle.load(f)
+        logging.info(f"Successfully loaded {filepath}"); return data
+    except Exception as e: logging.error(f"Error loading pickle file {filepath}: {e}", exc_info=True); return None
 
 
-def process_raw_annotations(raw_csv_path):
-    """Loads raw annotations, merges subtype columns. Returns DataFrame or None."""
-    raw_path = Path(raw_csv_path)
+def infer_type(subtype):
+    """
+    Infers the main type category from a given subtype string.
 
-    if not raw_path.is_file():
-        logging.error(f"Raw annotation file not found at {raw_path}")
-        return None
+    Args:
+        subtype: The subtype string to be analyzed. Can be NaN or a string identifying error types.
 
-    logging.info(f"Processing raw annotations from: {raw_path}")
+    Returns:
+        A string indicating the inferred type category, which can be:
+        - 'Factuality' for factuality-related subtypes.
+        - 'Faithfulness' for faithfulness-related subtypes.
+        - 'Other/Unclear' for explicitly marked unclear types.
+        - 'Annotation_Failed' for annotation failures.
+        - 'Unknown' if the subtype cannot be inferred.
+
+    Raises:
+        Logs a warning if the subtype cannot be inferred.
+    """
+
+    if pd.isna(subtype): return pd.NA
+    subtype_str = str(subtype).strip()
+    if subtype_str.startswith('A1_Dosage') or subtype_str.startswith('A2_Contra') or \
+       subtype_str.startswith('A3_Diagn') or subtype_str.startswith('B1_Statis') or \
+       subtype_str.startswith('B2_Fabri') or subtype_str == 'Factuality_Other': return 'Factuality'
+    elif subtype_str.startswith('A1_Context') or subtype_str.startswith('A2_Instruc') or \
+         subtype_str.startswith('B1_Extrap') or subtype_str == 'Faithfulness_Other': return 'Faithfulness'
+    elif subtype_str == 'Other/Unclear': return 'Other/Unclear'
+    elif "[API_FAILED]" in subtype_str or "[BLOCKED" in subtype_str: return "Annotation_Failed"
+    else: logging.warning(f"Could not infer type for subtype: '{subtype_str}'"); return 'Unknown'
+
+
+def load_reviewed_annotations(csv_path):
+    """
+    Loads a CSV file containing reviewed annotations into a Pandas DataFrame. The CSV must contain columns for 'id', 'automated_subtype', and 'automated_rationale'. The function renames the subtype column to 'hallucination_subtype' and the rationale column to 'annotation_rationale'. It also infers the main type category ('Factuality', 'Faithfulness', 'Other/Unclear', 'Annotation_Failed', 'Unknown') from the subtype string and adds it as a column named 'hallucination_type'. The function logs errors and warnings during processing, and returns None if there is an error.
+
+    Parameters
+    ----------
+    csv_path : str
+        The path to the CSV containing the reviewed annotations.
+
+    Returns
+    -------
+    df : pd.DataFrame
+        The loaded DataFrame with the specified columns and inferred 'hallucination_type'.
+    """
+    path = Path(csv_path)
+    if not path.is_file(): logging.error(f"Annotations CSV not found: {path}"); return None
     try:
-        df = pd.read_csv(raw_path)
-        logging.info(f"Loaded {len(df)} rows from raw annotations export.")
-
-        if "hallucination_type" not in df.columns:
-            logging.warning(
-                "'hallucination_type' column missing. Will attempt to infer."
-            )
-            df["hallucination_type"] = pd.NA
-        if "hallucination_subtype" not in df.columns:
-            df["hallucination_subtype"] = pd.NA
-
-        processed_factuality = 0
-        processed_faithfulness = 0
-
-        if "factuality_subtype_choice" in df.columns:
-            mask_infer_factuality = (
-                df["factuality_subtype_choice"].notna()
-                & df["hallucination_type"].isna()
-            )
-            df.loc[mask_infer_factuality, "hallucination_type"] = "Factuality"
-            logging.info(
-                f"Inferred 'Factuality' for {mask_infer_factuality.sum()} rows based on 'factuality_subtype_choice'."
-            )
-
-            mask_use_factuality = df["factuality_subtype_choice"].notna() & (
-                df["hallucination_type"] == "Factuality"
-            )
-            df.loc[mask_use_factuality, "hallucination_subtype"] = df.loc[
-                mask_use_factuality, "factuality_subtype_choice"
-            ]
-            processed_factuality = mask_use_factuality.sum()
-        else:
-            logging.warning("'factuality_subtype_choice' column not found.")
-
-        if "faithfulness_subtype_choice" in df.columns:
-            mask_infer_faithfulness = (
-                df["faithfulness_subtype_choice"].notna()
-                & df["hallucination_type"].isna()
-            )
-            df.loc[mask_infer_faithfulness, "hallucination_type"] = "Faithfulness"
-            logging.info(
-                f"Inferred 'Faithfulness' for {mask_infer_faithfulness.sum()} rows based on 'faithfulness_subtype_choice'."
-            )
-
-            mask_use_faithfulness = df["faithfulness_subtype_choice"].notna() & (
-                df["hallucination_type"] == "Faithfulness"
-            )
-            df.loc[mask_use_faithfulness, "hallucination_subtype"] = df.loc[
-                mask_use_faithfulness, "faithfulness_subtype_choice"
-            ]
-            processed_faithfulness = mask_use_faithfulness.sum()
-        else:
-            logging.warning("'faithfulness_subtype_choice' column not found.")
-
-        if "annotation_id" in df.columns:
-            mask_infer_other = (
-                df["hallucination_type"].isna() & df["annotation_id"].notna()
-            )
-            df.loc[mask_infer_other, "hallucination_type"] = "Other_Unclear"
-            logging.info(
-                f"Assigned 'Other_Unclear' to {mask_infer_other.sum()} annotated rows where type couldn't be inferred."
-            )
-
-        logging.info(f"Processed {processed_factuality} factuality subtypes.")
-        logging.info(f"Processed {processed_faithfulness} faithfulness subtypes.")
-
-        columns_needed = [
-            "id",
-            "question",
-            "context",
-            "reference_answers",
-            "generated_answer",
-            "is_correct",
-            "accuracy_metric_score",
-            "hallucination_type",
-            "hallucination_subtype",
-            "annotation_notes",
-            "high_temp_samples",
-            "selected_for_annotation",
-        ]
-        columns_present = [col for col in columns_needed if col in df.columns]
-        missing_cols = set(columns_needed) - set(columns_present)
-        if missing_cols:
-            logging.warning(
-                f"Columns missing from raw CSV, won't be in output: {missing_cols}"
-            )
-
-        processed_df = df[columns_present].copy()
-        logging.info("Finished processing annotations.")
-        return processed_df
-
-    except FileNotFoundError:
-        logging.error(f"Raw annotation file not found at {raw_path}")
-        return None
-    except Exception as e:
-        logging.error(f"Error processing annotations: {e}")
-        return None
+        df = pd.read_csv(path); logging.info(f"Loaded {len(df)} reviewed annotations from {path}")
+        id_col, subtype_col, rationale_col = 'id', 'automated_subtype', 'automated_rationale'
+        required_cols = [id_col, subtype_col]
+        if not all(c in df.columns for c in required_cols): logging.error(f"Annotations CSV missing {required_cols}. Found: {df.columns.tolist()}"); return None
+        df.rename(columns={subtype_col: 'hallucination_subtype', rationale_col: 'annotation_rationale'}, inplace=True)
+        df['hallucination_type'] = df['hallucination_subtype'].apply(infer_type)
+        cols_to_keep = ['id', 'hallucination_subtype', 'hallucination_type']
+        if 'annotation_rationale' in df.columns: cols_to_keep.append('annotation_rationale')
+        df['id'] = df['id'].astype(str).str.strip(); return df[cols_to_keep]
+    except Exception as e: logging.error(f"Error processing reviewed annotations CSV {path}: {e}"); return None
 
 
-def load_all_uncertainty_scores(run_dir_path):
-    """Loads SE and other scores for ALL validation samples from pkl files."""
-    run_dir = Path(run_dir_path)
-    uncertainty_path = run_dir / "uncertainty_measures.pkl"
-    generations_path = run_dir / "validation_generations.pkl"
+def load_score_csv(csv_path, id_col='id', score_col_name='score'):
+    """
+    Loads scores from a CSV file into a Pandas DataFrame.
 
-    uncertainty_data = load_pickle(uncertainty_path)
-    generations_data = load_pickle(generations_path)
+    Parameters
+    ----------
+    csv_path : str
+        The path to the CSV file containing scores.
+    id_col : str, optional
+        The name of the column containing unique identifiers (default is 'id').
+    score_col_name : str, optional
+        The name of the column containing score values (default is 'score').
 
-    if uncertainty_data is None or generations_data is None:
-        logging.error(
-            "Cannot load uncertainty scores without uncertainty AND generation pkl data."
-        )
-        return None
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame containing the 'id' and 'score' columns. If the file is not found
+        or there is an error, returns an empty DataFrame with the specified columns.
+        Logs warnings and errors as needed.
+    """
 
-    logging.info(
-        "Loading ALL uncertainty scores (SE, Naive, etc.) and matching to IDs..."
-    )
+    path = Path(csv_path)
+    if not path.is_file(): logging.warning(f"Score CSV not found: {path}. Scores for '{score_col_name}' missing."); return pd.DataFrame(columns=[id_col, score_col_name])
     try:
-        uncertainty_measures = uncertainty_data.get("uncertainty_measures", {})
-        se_scores = uncertainty_measures.get("semantic_entropy")
-        naive_entropy = uncertainty_measures.get("regular_entropy")
-
-        if se_scores is None:
-            logging.error("Missing 'semantic_entropy' in uncertainty_measures.pkl")
-            return None
-
-        task_ids_ordered = list(generations_data.keys())
-        num_tasks = len(task_ids_ordered)
-        num_se = len(se_scores)
-
-        if num_tasks != num_se:
-            logging.warning(
-                f"Mismatch length: {num_tasks} tasks vs {num_se} SE scores. Using min length: {min(num_tasks, num_se)}"
-            )
-            min_len = min(num_tasks, num_se)
-        else:
-            min_len = num_tasks
-
-        data_dict = {
-            "id": task_ids_ordered[:min_len],
-            "semantic_entropy": se_scores[:min_len],
-        }
-
-        if naive_entropy is not None and len(naive_entropy) >= min_len:
-            data_dict["naive_entropy"] = naive_entropy[:min_len]
-
-        all_scores_df = pd.DataFrame(data_dict)
-        logging.info(f"Loaded ALL scores for {len(all_scores_df)} tasks.")
-        return all_scores_df
-
-    except Exception as e:
-        logging.error(f"Error loading all uncertainty scores: {e}")
-        return None
+        df = pd.read_csv(path); logging.info(f"Loaded {len(df)} scores for '{score_col_name}' from {path}")
+        if id_col not in df.columns or score_col_name not in df.columns: logging.error(f"CSV {path} missing '{id_col}' or '{score_col_name}'."); return pd.DataFrame(columns=[id_col, score_col_name])
+        df[id_col] = df[id_col].astype(str).str.strip(); return df[[id_col, score_col_name]]
+    except Exception as e: logging.error(f"Error loading score CSV {path}: {e}"); return pd.DataFrame(columns=[id_col, score_col_name])
 
 
-def load_internal_signal_results(is_results_csv_path):
-    """Loads internal signal probe results (test split only)."""
-    is_path = Path(is_results_csv_path)
-    if not is_path.is_file():
-        logging.error(f"Internal signal results file not found: {is_path}")
-        return None
+def load_se_scores_from_pkl(run_dir_path):
+    """
+    Loads semantic entropy (SE) scores, naive entropy scores, and automated correctness labels from PKL files in a run directory.
 
-    logging.info(f"Loading internal signal results from: {is_path}")
+    Parameters
+    ----------
+    run_dir_path : str
+        The path to the run directory containing the uncertainty_measures.pkl and validation_generations.pkl files.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame with columns ['id', 'semantic_entropy', 'naive_entropy', 'automated_is_correct'].
+        If there is an error, returns None and logs the error.
+    """
+    run_dir = Path(run_dir_path); uncertainty_path = run_dir / "uncertainty_measures.pkl"; generations_path = run_dir / "validation_generations.pkl"
+    uncertainty_data = load_pickle(uncertainty_path); generations_data = load_pickle(generations_path)
+    if uncertainty_data is None or generations_data is None: logging.error("Need pkls for SE scores."); return None
+    logging.info("Loading SE/Naive scores and automated correctness labels...");
     try:
-        is_df = pd.read_csv(is_path)
-        cols_to_keep = [
-            "id",
-            "internal_signal_score",
-            "se_normalized",
-            "is_normalized",
-            "hybrid_0.5_0.5",
-        ]
-        cols_present = [col for col in cols_to_keep if col in is_df.columns]
-        if not cols_present or "id" not in cols_present:
-            logging.error(
-                f"Essential columns ('id', etc.) not found in IS results file: {is_path}"
-            )
-            return None
-        logging.info(
-            f"Loaded {len(is_df)} rows and columns {cols_present} from internal signal results."
-        )
-        return is_df[cols_present]
-    except Exception as e:
-        logging.error(f"Error loading internal signal results CSV: {e}")
-        return None
+        measures = uncertainty_data.get("uncertainty_measures", {}); se_scores = measures.get("semantic_entropy"); naive_entropy = measures.get("regular_entropy"); validation_is_false = uncertainty_data.get("validation_is_false")
+        task_ids_ordered = list(generations_data.keys()); num_tasks = len(task_ids_ordered)
+        def pad_or_truncate(data_list, name, target_len):
+            if data_list is None: return [np.nan] * target_len
+            current_len = len(data_list);
+            if current_len < target_len: return data_list + [np.nan] * (target_len - current_len)
+            elif current_len > target_len: return data_list[:target_len]
+            return data_list
+        se_scores = pad_or_truncate(se_scores, 'semantic_entropy', num_tasks); naive_entropy = pad_or_truncate(naive_entropy, 'regular_entropy', num_tasks); validation_is_false = pad_or_truncate(validation_is_false, 'validation_is_false', num_tasks)
+        data_dict = {"id": [str(tid).strip() for tid in task_ids_ordered], "semantic_entropy": se_scores, "naive_entropy": naive_entropy, "automated_is_correct": [np.nan if pd.isna(x) else not x for x in validation_is_false]}
+        scores_df = pd.DataFrame(data_dict); logging.info(f"Loaded SE/Naive/AutoCorrect scores for {len(scores_df)} tasks."); return scores_df
+    except Exception as e: logging.error(f"Error loading SE/Naive from pkl: {e}"); return None
+
+
+def load_generation_details(pkl_path, accuracy_threshold=0.5):
+    """
+    Loads generation details from a pickle file into a DataFrame with columns ['id', 'question', 'context', 'reference_answers', 'generated_answer', 'accuracy_metric_score', 'is_correct_auto_from_gen'].
+
+    Parameters
+    ----------
+    pkl_path : str
+        The path to the pickle file containing the generation details.
+    accuracy_threshold : float, default=0.5
+        The accuracy threshold above which a generation is considered correct.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame with columns ['id', 'question', 'context', 'reference_answers', 'generated_answer', 'accuracy_metric_score', 'is_correct_auto_from_gen'].
+        If there is an error, returns None and logs the error.
+    """
+    generations_data = load_pickle(pkl_path);
+    if generations_data is None: return None
+    logging.info("Loading generation details..."); data_list = []
+    for task_id, task_details in generations_data.items():
+        most_likely = task_details.get("most_likely_answer", {}); reference = task_details.get("reference", {}); answers = reference.get('answers', {}); ref_texts = answers.get('text', [])
+        accuracy = most_likely.get("accuracy"); is_correct_auto = accuracy > accuracy_threshold if accuracy is not None else None
+        data_list.append({"id": str(task_id).strip(), "question": task_details.get("question", ""), "context": task_details.get("context", None),
+                          "reference_answers": str(ref_texts), "generated_answer": most_likely.get("response", "[GENERATION FAILED]"),
+                          "accuracy_metric_score": most_likely.get("accuracy", np.nan), "is_correct_auto_from_gen": is_correct_auto})
+    df = pd.DataFrame(data_list); logging.info(f"Loaded generation details for {len(df)} tasks."); return df
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Process annotations, load scores, and merge into final analysis file."
-    )
-    parser.add_argument(
-        "raw_annotations_csv",
-        help="Path to the raw CSV file exported from Label Studio.",
-    )
-    parser.add_argument(
-        "run_files_dir",
-        help="Path to the directory containing pkl files (validation_generations.pkl, uncertainty_measures.pkl) for the specific run.",
-    )
-    parser.add_argument(
-        "internal_signal_csv",
-        help="Path to the CSV file containing internal signal results (output of internal_signal_probe.py).",
-    )
-    parser.add_argument(
-        "final_output_csv", help="Path to save the final merged CSV for analysis."
-    )
+    parser = argparse.ArgumentParser(description="Merge reviewed annotations with ALL scores for SUBTYPE analysis.")
+    parser.add_argument("reviewed_annotations_csv", help="Path to reviewed automated annotations CSV.")
+    parser.add_argument("run_files_dir", help="Path to run files directory.")
+    parser.add_argument("--is_scores_all_csv", required=True, help="Path to CSV with IS scores for ALL samples.")
+    parser.add_argument("--hybrid_meta_scores_all_csv", required=True, help="Path to CSV with Hybrid Meta scores for ALL samples.")
+    parser.add_argument("final_output_csv", help="Path to save final merged CSV for subtype analysis.")
     args = parser.parse_args()
 
-    processed_annotations_df = process_raw_annotations(args.raw_annotations_csv)
-    if processed_annotations_df is None:
-        exit()
+    df_annotations = load_reviewed_annotations(args.reviewed_annotations_csv)
+    df_se_naive_auto = load_se_scores_from_pkl(args.run_files_dir)
+    df_is_scores = load_score_csv(args.is_scores_all_csv, score_col_name='internal_signal_score')
+    df_hybrid_meta = load_score_csv(args.hybrid_meta_scores_all_csv, score_col_name='hybrid_meta_score')
+    gen_pkl_path = Path(args.run_files_dir) / "validation_generations.pkl"
+    df_generation_details = load_generation_details(gen_pkl_path)
 
-    all_uncertainty_scores_df = load_all_uncertainty_scores(args.run_files_dir)
-    if all_uncertainty_scores_df is None:
-        exit()
+    if any(df is None for df in [df_annotations, df_se_naive_auto, df_generation_details]) or \
+       (df_is_scores.empty and Path(args.is_scores_all_csv).exists()) or \
+       (df_hybrid_meta.empty and Path(args.hybrid_meta_scores_all_csv).exists()):
+        logging.error("One or more essential input files failed to load. Exiting."); exit(1)
 
-    internal_signal_df = load_internal_signal_results(args.internal_signal_csv)
-    if internal_signal_df is None:
-        exit()  # Or proceed without IS scores if desired
+    final_df = df_annotations.copy(); logging.info(f"Starting merge with {len(final_df)} annotated samples.")
+    final_df = pd.merge(final_df, df_se_naive_auto, on="id", how="left")
+    final_df = pd.merge(final_df, df_is_scores, on="id", how="left")
+    final_df = pd.merge(final_df, df_hybrid_meta, on="id", how="left")
+    cols_to_merge = ['id'] + [col for col in df_generation_details.columns if col not in final_df.columns and col != 'id']
+    final_df = pd.merge(final_df, df_generation_details[cols_to_merge], on="id", how="left")
+    logging.info(f"Annotated subset row count after merging: {len(final_df)}")
 
-    logging.info("Merging processed annotations with ALL uncertainty scores...")
+    se_col, is_col, hybrid_simple_col = 'semantic_entropy', 'internal_signal_score', 'hybrid_simple_score'
+    if se_col in final_df.columns and is_col in final_df.columns:
+        logging.info("Calculating simple hybrid score for the annotated subset...")
+        scaler_se, scaler_is = MinMaxScaler(), MinMaxScaler()
+        se_subset, is_subset = final_df[se_col].dropna(), final_df[is_col].dropna()
+        se_norm_col, is_norm_col = f"{se_col}_norm_subset", f"{is_col}_norm_subset"
+        final_df[se_norm_col], final_df[is_norm_col] = np.nan, np.nan
+        if not se_subset.empty:
+            try: final_df.loc[se_subset.index, se_norm_col] = scaler_se.fit_transform(se_subset.values.reshape(-1, 1)).flatten()
+            except ValueError: logging.warning("SE constant in subset."); final_df.loc[se_subset.index, se_norm_col] = 0.5
+        if not is_subset.empty:
+            try: final_df.loc[is_subset.index, is_norm_col] = scaler_is.fit_transform(is_subset.values.reshape(-1, 1)).flatten()
+            except ValueError: logging.warning("IS constant in subset."); final_df.loc[is_subset.index, is_norm_col] = 0.5
+        final_df[hybrid_simple_col] = 0.5 * final_df[se_norm_col] + 0.5 * final_df[is_norm_col]
+        logging.info(f"Calculated '{hybrid_simple_col}'. Missing: {final_df[hybrid_simple_col].isnull().sum()}")
+    else: final_df[hybrid_simple_col] = np.nan
 
-    processed_annotations_df["id"] = (
-        processed_annotations_df["id"].astype(str).str.strip()
-    )
-    all_uncertainty_scores_df["id"] = (
-        all_uncertainty_scores_df["id"].astype(str).str.strip()
-    )
-    internal_signal_df["id"] = internal_signal_df["id"].astype(str).str.strip()
+    logging.info("Final DataFrame info for subtype analysis:")
+    final_df.info()
+    final_cols = [c for c in [
+        'id', 'question', 'context', 'reference_answers', 'generated_answer',
+        'accuracy_metric_score', 'automated_is_correct',
+        'hallucination_type', 'hallucination_subtype', 'annotation_rationale',
+        'semantic_entropy', 'naive_entropy', 'internal_signal_score',
+        hybrid_simple_col, 'hybrid_meta_score'
+    ] if c in final_df.columns]
+    final_df_output = final_df[final_cols]
 
-    logging.info(f"Annotation DF head:\n{processed_annotations_df.head()}")
-    logging.info(
-        f"Annotation DF IDs unique: {processed_annotations_df['id'].nunique()}, total: {len(processed_annotations_df)}"
-    )
-    logging.info(f"All Scores DF head:\n{all_uncertainty_scores_df.head()}")
-    logging.info(
-        f"All Scores DF IDs unique: {all_uncertainty_scores_df['id'].nunique()}, total: {len(all_uncertainty_scores_df)}"
-    )
-
-    merged_df = pd.merge(
-        processed_annotations_df, all_uncertainty_scores_df, on="id", how="left"
-    )
-    logging.info(f"After merge with All Scores - Head:\n{merged_df.head()}")
-    logging.info(
-        f"After merge with All Scores - NaN SE count: {merged_df['semantic_entropy'].isnull().sum()}"
-    )
-
-    if internal_signal_df is not None:
-        logging.info(f"IS Scores DF head:\n{internal_signal_df.head()}")
-        logging.info(
-            f"IS Scores DF IDs unique: {internal_signal_df['id'].nunique()}, total: {len(internal_signal_df)}"
-        )
-        final_df = pd.merge(merged_df, internal_signal_df, on="id", how="left")
-        logging.info(f"After merge with IS Scores - Head:\n{final_df.head()}")
-        logging.info(
-            f"After merge with IS Scores - NaN SE count: {final_df['semantic_entropy'].isnull().sum()}"
-        )
-        logging.info(
-            f"After merge with IS Scores - NaN IS count: {final_df['internal_signal_score'].isnull().sum()}"
-        )
-    else:
-        final_df = merged_df
-
-    final_df = pd.merge(merged_df, internal_signal_df, on="id", how="left")
-    logging.info(f"Rows after merging with internal signal scores: {len(final_df)}")
-    if "internal_signal_score" in final_df:
-        logging.info(
-            f"Number of rows with non-null internal signal scores: {final_df['internal_signal_score'].notna().sum()}"
-        )
-        if final_df["internal_signal_score"].notna().sum() == 0:
-            logging.warning(
-                "No internal signal scores were merged. Check IDs in internal_signal_results.csv match annotations."
-            )
-
-    final_path = Path(args.final_output_csv)
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-
-    annotated_count = len(final_df["hallucination_type"].dropna())
-    logging.info(
-        f"Final dataset includes {annotated_count} rows with hallucination type assigned."
-    )
-
-    final_df.to_csv(final_path, index=False)
-    logging.info(f"Final analysis-ready data saved to: {final_path}")
-    logging.info("\n--- Processing Complete ---")
+    final_path = Path(args.final_output_csv); final_path.parent.mkdir(parents=True, exist_ok=True)
+    try: final_df_output.to_csv(final_path, index=False); logging.info(f"Final subtype analysis data ({len(final_df_output)} samples) saved to: {final_path}")
+    except IOError as e: logging.error(f"Error writing final file {final_path}: {e}")
+    logging.info("\n--- Data Preparation Complete ---")

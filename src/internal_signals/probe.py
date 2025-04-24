@@ -1,357 +1,188 @@
 import argparse
 import pickle
 import logging
-import random
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import torch
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, accuracy_score
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
-
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-
-def load_pickle(filepath):
-    """Loads a pickle file."""
-    filepath = Path(filepath)
-    if not filepath.is_file():
-        logging.error(f"Pickle file not found: {filepath}")
-        return None
-    try:
-        with open(filepath, "rb") as f:
-            data = pickle.load(f)
-        logging.info(f"Successfully loaded {filepath}")
-        return data
-    except Exception as e:
-        logging.error(f"Error loading pickle file {filepath}: {e}")
-        return None
-
+from src.utils.logging_utils import setup_logger
+from src.utils.utils import load_pickle
 
 def prepare_probe_data(generations_data, accuracy_threshold=0.5):
-    """Extracts hidden states and correctness labels for probing."""
-    hidden_states = []
-    labels = []
-    task_ids = []
+    """
+    Prepare the data for internal signal probing.
 
+    Parameters
+    ----------
+    generations_data : dict
+        The generations data loaded from a pickle file.
+    accuracy_threshold : float, default=0.5
+        The accuracy threshold above which a generation is considered correct.
+
+    Returns
+    -------
+    hidden_states : list of torch.Tensors
+        The internal hidden state embeddings.
+    labels : list of bool
+        The labels (True if correct, False otherwise) for each task.
+    task_ids : list of str
+        The task IDs corresponding to the above data.
+    """
+    hidden_states = []; labels = []; task_ids = []
     logging.info("Preparing data for internal signal probe...")
-    processed_count = 0
-    skipped_count = 0
-
+    processed_count = 0; skipped_count = 0
     for task_id, task_details in generations_data.items():
         try:
             most_likely = task_details.get("most_likely_answer", {})
-            embedding = most_likely.get("embedding")
-            accuracy = most_likely.get("accuracy")
-
+            embedding = most_likely.get("embedding"); accuracy = most_likely.get("accuracy")
             if embedding is not None and accuracy is not None:
-                if isinstance(embedding, torch.Tensor):
-                    hidden_states.append(embedding.cpu())
-                else:
-                    try:
-                        hidden_states.append(torch.tensor(embedding).cpu())
-                    except Exception as conversion_e:
-                        logging.warning(
-                            f"Could not convert embedding for task {task_id} to tensor: {conversion_e}. Skipping."
-                        )
-                        skipped_count += 1
-                        continue
-
-                is_correct = accuracy > accuracy_threshold
-                labels.append(is_correct)
-                task_ids.append(task_id)
-                processed_count += 1
-            else:
-                logging.warning(
-                    f"Task {task_id} missing 'embedding' or 'accuracy' in 'most_likely_answer'. Skipping."
-                )
-                skipped_count += 1
-
-        except Exception as e:
-            logging.error(f"Error processing task {task_id}: {e}. Skipping.")
-            skipped_count += 1
-
-    logging.info(
-        f"Data preparation complete. Processed: {processed_count}, Skipped: {skipped_count}"
-    )
-    if not hidden_states:
-        logging.error("No valid hidden states extracted.")
-        return None, None, None
-
+                try:
+                    if isinstance(embedding, torch.Tensor): hs_tensor = embedding.cpu()
+                    else: hs_tensor = torch.tensor(embedding).cpu()
+                    hidden_states.append(hs_tensor)
+                    is_correct = accuracy > accuracy_threshold; labels.append(is_correct); task_ids.append(task_id); processed_count += 1
+                except Exception as conversion_e: logging.warning(f"Could not process embedding for {task_id}: {conversion_e}. Skipping."); skipped_count += 1; continue
+            else: logging.warning(f"Task {task_id} missing embedding/accuracy. Skipping."); skipped_count += 1
+        except Exception as e: logging.error(f"Error processing task {task_id}: {e}. Skipping."); skipped_count += 1
+    logging.info(f"Data preparation complete. Processed: {processed_count}, Skipped: {skipped_count}")
+    if not hidden_states: logging.error("No valid hidden states extracted."); return None, None, None
     return hidden_states, labels, task_ids
 
 
-def load_se_scores(run_dir_path, task_ids_ordered):
-    """Loads SE scores ensuring order matches task_ids_ordered."""
-    run_dir = Path(run_dir_path)
-    uncertainty_path = run_dir / "uncertainty_measures.pkl"
+def run_internal_signal_probe_cv(run_id, base_dir, n_splits=5, random_seed=42):
+    """
+    Runs the internal signal probe using K-Fold Cross-Validation.
 
-    uncertainty_data = load_pickle(uncertainty_path)
-    if uncertainty_data is None:
-        return None
+    The internal signal probe is a binary logistic regression model that is trained to predict whether a generation is correct or not based on the internal state embeddings of the model. The probe is evaluated using K-Fold Cross-Validation, and the out-of-fold predictions are saved to a CSV file.
 
-    logging.info("Loading SE scores...")
-    try:
-        uncertainty_measures = uncertainty_data.get("uncertainty_measures", {})
-        se_scores_list = uncertainty_measures.get("semantic_entropy")
-        if se_scores_list is None:
-            logging.error("Missing 'semantic_entropy' in uncertainty_measures.pkl")
-            return None
+    Parameters
+    ----------
+    run_id : str
+        The ID of the run.
+    base_dir : str
+        The base directory where the run data is located.
+    n_splits : int, default=5
+        The number of folds for K-Fold Cross-Validation.
+    random_seed : int, default=42
+        The random seed for the logistic regression model.
 
-        if len(task_ids_ordered) != len(se_scores_list):
-            logging.warning(
-                f"Mismatch length: {len(task_ids_ordered)} tasks vs {len(se_scores_list)} SE scores. Using min length."
-            )
-            min_len = min(len(task_ids_ordered), len(se_scores_list))
-            id_to_score_map = {
-                task_id: se_scores_list[i]
-                for i, task_id in enumerate(task_ids_ordered[:min_len])
-            }
-        else:
-            id_to_score_map = {
-                task_id: se_scores_list[i] for i, task_id in enumerate(task_ids_ordered)
-            }
-
-        logging.info(f"SE scores loaded for {len(id_to_score_map)} tasks.")
-        return id_to_score_map
-
-    except Exception as e:
-        logging.error(f"Error loading SE scores: {e}")
-        return None
-
-
-def run_internal_signal_probe(run_id, base_dir, test_size, random_seed, output_csv):
-    """Loads data, trains probe, evaluates, calculates hybrid scores, and saves results."""
+    Returns
+    -------
+    bool
+        True if the probe was successfully trained and evaluated, False otherwise.
+    """
+    setup_logger()
     run_dir = Path(base_dir)
-    logging.info(f"--- Starting Internal Signal Probe for Run: {run_id} ---")
-    logging.info(f"Looking for files in: {run_dir}")
+    logging.info(f"--- Running IS Probe K-Fold CV & Full Prediction for Run: {run_id} ---")
 
     generations_path = run_dir / "validation_generations.pkl"
     generations_data = load_pickle(generations_path)
-    if generations_data is None:
-        return
+    if generations_data is None: return False
 
     hidden_states, labels, task_ids_all = prepare_probe_data(generations_data)
-    if hidden_states is None:
-        return
+    if hidden_states is None: return False
+    if len(np.unique(labels)) < 2: logging.error("Only one class label found. Cannot train/evaluate probe."); return False
 
-    if len(np.unique(labels)) < 2:
-        logging.error(
-            "Only one class found in labels. Cannot train classifier. Check accuracy threshold or data."
-        )
-        return
+    logging.info(f"Prepared {len(hidden_states)} embeddings and labels for K-Fold CV.")
 
     try:
-        hs_train, hs_test, y_train, y_test, ids_train, ids_test = train_test_split(
-            hidden_states,
-            labels,
-            task_ids_all,
-            test_size=test_size,
-            random_state=random_seed,
-            stratify=labels,
-        )
-        logging.info(f"Split data: {len(hs_train)} train, {len(hs_test)} test samples.")
-    except ValueError as e:
-        logging.error(f"Error during train/test split (perhaps too few samples?): {e}")
-        return
+        X_full = np.array([vec.numpy().flatten() for vec in hidden_states])
+        y_full = np.array(labels)
+        ids_full = np.array(task_ids_all)
+    except Exception as e:
+        logging.error(f"Error converting embeddings to NumPy array: {e}"); return False
 
-    logging.info("Training Logistic Regression probe...")
-    try:
-        X_train = np.array([vec.numpy().flatten() for vec in hs_train])
-        y_train = np.array(y_train)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+    oof_predictions = np.full(len(y_full), np.nan)
+    oof_ids = np.full(len(y_full), None, dtype=object)
+
+    logging.info(f"Starting {n_splits}-Fold Cross-Validation for IS probe...")
+    fold_aurocs = []
+
+    for fold_idx, (train_index, test_index) in enumerate(skf.split(X_full, y_full)):
+        logging.info(f"--- Processing Fold {fold_idx + 1}/{n_splits} ---")
+        X_train, X_test = X_full[train_index], X_full[test_index]
+        y_train, y_test = y_full[train_index], y_full[test_index]
+        ids_test = ids_full[test_index]
 
         if len(np.unique(y_train)) < 2:
-            logging.error(
-                "Training set contains only one class after split. Cannot train."
-            )
-            return
+             logging.warning(f"Fold {fold_idx + 1}: Training split has only one class. Probe might not be effective. Skipping fold evaluation.")
+             oof_predictions[test_index] = np.nan
+             oof_ids[test_index] = ids_test
+             continue
+        
+        try:
+            classifier_fold = LogisticRegression(random_state=random_seed, class_weight="balanced", max_iter=1000)
+            classifier_fold.fit(X_train, y_train)
+            logging.info(f"Fold {fold_idx + 1}: Probe trained.")
+        except Exception as e:
+             logging.error(f"Fold {fold_idx + 1}: Error during training: {e}. Skipping predictions for this fold.")
+             oof_predictions[test_index] = np.nan
+             oof_ids[test_index] = ids_test
+             continue
 
-        classifier = LogisticRegression(
-            random_state=random_seed, class_weight="balanced", max_iter=1000
-        )
-        classifier.fit(X_train, y_train)
-        logging.info("Probe training complete.")
-    except Exception as e:
-        logging.error(f"Error during classifier training: {e}")
-        return
+        try:
+            probabilities_test = classifier_fold.predict_proba(X_test)
+            false_class_idx = np.where(classifier_fold.classes_ == False)[0][0]
+            oof_preds_fold = probabilities_test[:, false_class_idx]
 
-    logging.info("Evaluating probe on test set...")
+            oof_predictions[test_index] = oof_preds_fold
+            oof_ids[test_index] = ids_test
+
+            if len(np.unique(y_test)) == 2:
+                fold_auc = roc_auc_score(y_test == False, oof_preds_fold)
+                fold_aurocs.append(fold_auc)
+                logging.info(f"Fold {fold_idx + 1}: Test AUROC = {fold_auc:.4f}")
+            else:
+                 logging.warning(f"Fold {fold_idx + 1}: Test split has only one class, cannot calculate fold AUROC.")
+
+        except Exception as e:
+            logging.error(f"Fold {fold_idx + 1}: Error during prediction/evaluation: {e}")
+            oof_predictions[test_index] = np.nan
+            oof_ids[test_index] = ids_test
+
+    logging.info("K-Fold Cross-Validation finished.")
+    if fold_aurocs: logging.info(f"Average Out-of-Fold AUROC: {np.mean(fold_aurocs):.4f} (+/- {np.std(fold_aurocs):.4f})")
+
+    if not np.all(oof_ids != None):
+        missing_ids_indices = np.where(oof_ids == None)[0]
+        logging.error(f"CRITICAL ERROR: {len(missing_ids_indices)} IDs were not assigned during K-Fold. Check logic.")
+        for idx in missing_ids_indices:
+             oof_ids[idx] = ids_full[idx]
+
+
+    results_oof_df = pd.DataFrame({
+        'id': oof_ids,
+        'internal_signal_score': oof_predictions
+    })
+    results_oof_df['id'] = results_oof_df['id'].astype(str).str.strip()
+
+    output_path_all = run_dir / f"{run_id}_internal_signal_scores_all.csv"
     try:
-        X_test = np.array([vec.numpy().flatten() for vec in hs_test])
-        y_test = np.array(y_test)
+        results_oof_df.to_csv(output_path_all, index=False)
+        logging.info(f"Saved K-Fold Out-of-Fold IS scores ({len(results_oof_df)} rows, {results_oof_df['internal_signal_score'].isnull().sum()} NaNs) to: {output_path_all}")
+    except IOError as e: logging.error(f"Error writing OOF IS scores file: {e}"); return False
 
-        if len(np.unique(y_test)) < 2:
-            logging.warning(
-                "Test set contains only one class after split. Some metrics might be undefined."
-            )
-            accuracy = classifier.score(X_test, y_test)
-            auc = np.nan
-            probabilities = classifier.predict_proba(X_test)
-        else:
-            accuracy = classifier.score(X_test, y_test)
-            probabilities = classifier.predict_proba(X_test)
-            false_class_index = classifier.classes_.tolist().index(False)
-            internal_signal_scores = probabilities[:, false_class_index]
-            auc = roc_auc_score(y_test == False, internal_signal_scores)
-
-        logging.info(f"Internal Signal Probe Performance:")
-        logging.info(f"  Accuracy: {accuracy:.4f}")
-        logging.info(f"  AUC (Predicting Incorrect): {auc:.4f}")
-
-        results_df = pd.DataFrame(
-            {
-                "id": ids_test,
-                "is_correct": y_test,
-                "internal_signal_score": (
-                    internal_signal_scores if len(np.unique(y_test)) == 2 else np.nan
-                ),
-            }
-        )
-
-    except Exception as e:
-        logging.error(f"Error during evaluation: {e}")
-        return
-
-    all_task_ids_ordered = list(generations_data.keys())
-    id_to_se_score_map = load_se_scores(run_dir, all_task_ids_ordered)
-    if id_to_se_score_map is None:
-        logging.warning("Could not load SE scores. Hybrid analysis will be skipped.")
-        se_scores_test = pd.Series([np.nan] * len(results_df), index=results_df.index)
-    else:
-        results_df["semantic_entropy"] = results_df["id"].map(id_to_se_score_map)
-        if results_df["semantic_entropy"].isnull().any():
-            logging.warning(
-                "Some test samples could not be matched with SE scores. Check ID consistency."
-            )
-
-    logging.info("Performing hybridization analysis...")
-    if (
-        "semantic_entropy" in results_df.columns
-        and "internal_signal_score" in results_df.columns
-        and not results_df["semantic_entropy"].isnull().all()
-        and not results_df["internal_signal_score"].isnull().all()
-    ):
-
-        valid_scores_df = results_df.dropna(
-            subset=["semantic_entropy", "internal_signal_score"]
-        ).copy()
-        logging.info(
-            f"Analyzing {len(valid_scores_df)} samples with valid SE and IS scores."
-        )
-
-        if (
-            len(valid_scores_df) > 1
-            and len(valid_scores_df["is_correct"].unique()) == 2
-        ):
-            scaler_se = MinMaxScaler()
-            scaler_is = MinMaxScaler()
-            try:
-                valid_scores_df["se_normalized"] = scaler_se.fit_transform(
-                    valid_scores_df[["semantic_entropy"]]
-                )
-            except ValueError:
-                logging.warning(
-                    "SE scores might be constant, cannot normalize with MinMaxScaler."
-                )
-                valid_scores_df["se_normalized"] = 0.5
-            try:
-                valid_scores_df["is_normalized"] = scaler_is.fit_transform(
-                    valid_scores_df[["internal_signal_score"]]
-                )
-            except ValueError:
-                logging.warning(
-                    "IS scores might be constant, cannot normalize with MinMaxScaler."
-                )
-                valid_scores_df["is_normalized"] = 0.5
-
-            valid_scores_df["hybrid_0.5_0.5"] = (
-                0.5 * valid_scores_df["se_normalized"]
-                + 0.5 * valid_scores_df["is_normalized"]
-            )
-
-            true_incorrect_labels = valid_scores_df["is_correct"] == False
-            auc_se_only = roc_auc_score(
-                true_incorrect_labels, valid_scores_df["semantic_entropy"]
-            )
-            auc_is_only = roc_auc_score(
-                true_incorrect_labels, valid_scores_df["internal_signal_score"]
-            )
-            auc_hybrid_05 = roc_auc_score(
-                true_incorrect_labels, valid_scores_df["hybrid_0.5_0.5"]
-            )
-
-            logging.info("--- Hybridization AUC Results (on Test Set) ---")
-            logging.info(f"  SE Only AUC:              {auc_se_only:.4f}")
-            logging.info(f"  Internal Signal Only AUC: {auc_is_only:.4f}")
-            logging.info(f"  Hybrid (0.5/0.5) AUC:   {auc_hybrid_05:.4f}")
-
-            results_df = results_df.merge(
-                valid_scores_df[
-                    ["id", "se_normalized", "is_normalized", "hybrid_0.5_0.5"]
-                ],
-                on="id",
-                how="left",
-            )
-
-        else:
-            logging.warning(
-                "Not enough data or classes after dropping NaNs to calculate hybrid AUCs."
-            )
-    else:
-        logging.warning(
-            "Skipping hybridization analysis as SE or IS scores are missing/invalid."
-        )
-
-    output_path = Path(output_csv)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.info("Training final probe model on ALL valid data...")
     try:
-        results_df.to_csv(output_path, index=False)
-        logging.info(f"Detailed test set results saved to: {output_path}")
-    except IOError as e:
-        logging.error(f"Error writing output file {output_path}: {e}")
-
+        final_classifier = LogisticRegression(random_state=random_seed, class_weight="balanced", max_iter=1000)
+        final_classifier.fit(X_full, y_full)
+        probe_model_path = run_dir / f"{run_id}_probe_model.pkl"
+        with open(probe_model_path, 'wb') as f_probe: pickle.dump(final_classifier, f_probe)
+        logging.info(f"Saved final probe model trained on all data to: {probe_model_path}")
+    except Exception as e:
+        logging.error(f"Error training/saving final probe model: {e}")
+    return True
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Train and evaluate an internal signal probe for hallucination detection."
-    )
-    parser.add_argument(
-        "run_id", type=str, help="WandB Run ID of the experiment to process."
-    )
-    parser.add_argument(
-        "--base_dir",
-        type=str,
-        required=True,
-        help="Directory containing run files ('validation_generations.pkl', 'uncertainty_measures.pkl').",
-    )
-    parser.add_argument(
-        "--test_size",
-        type=float,
-        default=0.3,
-        help="Proportion of data to use for the test set for the probe.",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for reproducibility."
-    )
-    parser.add_argument(
-        "--output_csv",
-        type=str,
-        default="internal_signal_results.csv",
-        help="Name for the output CSV file saving test set results.",
-    )
-
+    parser = argparse.ArgumentParser(description="Train IS probe using K-Fold CV and predict on all samples.")
+    parser.add_argument("run_id", type=str, help="Run ID.")
+    parser.add_argument("--base_dir", type=str, required=True, help="Dir containing validation_generations.pkl.")
+    parser.add_argument("--n_splits", type=int, default=5, help="Number of folds for K-Fold CV.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     args = parser.parse_args()
 
-    full_output_path = args.output_csv
-
-    run_internal_signal_probe(
-        run_id=args.run_id,
-        base_dir=args.base_dir,
-        test_size=args.test_size,
-        random_seed=args.seed,
-        output_csv=full_output_path,
-    )
+    run_internal_signal_probe_cv(args.run_id, args.base_dir, args.n_splits, args.seed)

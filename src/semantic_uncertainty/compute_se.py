@@ -37,6 +37,40 @@ OUTPUT_UNCERTAINTY_FILE = "uncertainty_measures.pkl"
 
 
 def main(args):
+    """
+    Main function to compute semantic uncertainty measures from a given run directory.
+
+    The run directory should contain the following files:
+    - validation_generations.pkl: A pickle file containing the validation
+        generations, which should be a dictionary with task IDs as keys
+        and dictionaries containing the generation details as values.
+    - train_generations.pkl: A pickle file containing the training generations,
+        which should be a dictionary with task IDs as keys and dictionaries
+        containing the generation details as values.
+    - experiment_details.pkl: A pickle file containing experiment details.
+
+    The function will compute the following uncertainty measures:
+    - Predictive entropy: The entropy of the predictive distribution.
+    - Semantic entropy: The entropy of the semantic distribution.
+    - Cluster assignment entropy: The entropy of the cluster assignment
+        distribution.
+    - P(IK): The probability of a task being answerable given the semantic
+        distribution.
+    - P(IK) for answerability: The probability of a task being answerable given
+        the semantic distribution.
+
+    The function will save the computed uncertainty measures to a file named
+    "uncertainty_measures.pkl" in the run directory.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        The command line arguments parsed by argparse.
+
+    Returns
+    -------
+    None
+    """
     logging_utils.setup_logger()
     run_dir = Path(args.run_dir)
     run_id = run_dir.name
@@ -119,6 +153,15 @@ def main(args):
     )
 
     def is_answerable(generation):
+        """
+        Checks if a generation is answerable, i.e. if the reference contains answer text.
+
+        Args:
+            generation (dict): A single generation from the validation set.
+
+        Returns:
+            bool: True if the generation is answerable, False otherwise.
+        """
         ref = generation.get("reference", {})
         ans = ref.get("answers", {})
         text = ans.get("text", [])
