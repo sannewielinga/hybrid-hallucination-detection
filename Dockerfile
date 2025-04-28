@@ -25,5 +25,4 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-# This expects the config file path to be passed as an argument at runtime
 CMD ["python", "src/run_experiment.py"]

@@ -18,10 +18,8 @@ def add_sampling_flag(original_jsonl_path, sampled_ids_path, output_jsonl_path):
         print(f"Error: Sampled IDs file not found at {sampled_ids_path}")
         return
 
-    # Read sampled IDs into a set for fast lookup
     try:
         with open(sampled_ids_path, 'r') as f:
-            # Strip whitespace and ignore empty lines
             sampled_ids = {line.strip() for line in f if line.strip()}
         print(f"Read {len(sampled_ids)} sampled IDs from {sampled_ids_path}")
     except Exception as e:
@@ -38,9 +36,8 @@ def add_sampling_flag(original_jsonl_path, sampled_ids_path, output_jsonl_path):
                 try:
                     task_data = json.loads(line)
                     tasks_processed += 1
-                    task_id = str(task_data.get('id', '')) # Ensure ID is string for comparison
+                    task_id = str(task_data.get('id', ''))
 
-                    # Add the flag
                     if task_id in sampled_ids:
                         task_data['selected_for_annotation'] = True
                         tasks_flagged += 1
@@ -61,7 +58,6 @@ def add_sampling_flag(original_jsonl_path, sampled_ids_path, output_jsonl_path):
              print(f"Warning: Number of flagged tasks ({tasks_flagged}) does not match number of sampled IDs ({len(sampled_ids)}). Some IDs might be missing in the original JSONL.")
 
 
-        # Write the modified data to the output file
         output_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_jsonl_path, 'w', encoding='utf-8') as outfile:
             for task_data in output_data:
