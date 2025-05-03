@@ -247,3 +247,73 @@ def compatible_bootstrap_aurac(func, rng):
         return bootstrap(helper, rng=rng)(y_true_correct_y_score)
 
     return converted_func
+
+
+def calculate_ece(y_true, y_prob, n_bins=10):
+    """
+    Calculates the Expected Calibration Error (ECE).
+
+    ECE measures the difference between predicted probability and the actual
+    fraction of positives in different probability bins. A lower ECE indicates
+    better calibration.
+
+    Args:
+        y_true (np.ndarray): Array of true binary labels (0 or 1).
+        y_prob (np.ndarray): Array of predicted probabilities (between 0 and 1).
+        n_bins (int): Number of bins to divide the probability range into.
+
+    Returns:
+        float: The Expected Calibration Error score, or np.nan if calculation fails.
+
+    Formula:
+        ECE = sum_{m=1}^{M} (|acc(B_m) - conf(B_m)| * |B_m|) / N
+        where:
+            M = number of bins
+            B_m = set of indices of samples whose prediction confidence falls into bin m
+            N = total number of samples
+            acc(B_m) = accuracy of bin m (fraction of positives in B_m)
+                     = (1 / |B_m|) * sum_{i in B_m} y_true_i
+            conf(B_m) = average confidence of bin m
+                      = (1 / |B_m|) * sum_{i in B_m} y_prob_i
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+
+    valid_mask = ~np.isnan(y_true) & ~np.isnan(y_prob)
+    if not np.any(valid_mask):
+        logging.warning("ECE calculation: No valid samples after NaN filtering.")
+        return np.nan
+
+    y_true = y_true[valid_mask]
+    y_prob = y_prob[valid_mask]
+    n_samples = len(y_true)
+
+    if n_samples == 0:
+        logging.warning("ECE calculation: Zero valid samples.")
+        return np.nan
+    if n_bins <= 0:
+        logging.error("ECE calculation: n_bins must be positive.")
+        return np.nan
+    if not (np.all(y_prob >= 0) and np.all(y_prob <= 1)):
+         if np.any(y_prob < 0) or np.any(y_prob > 1):
+              logging.warning(f"ECE calculation: Probabilities outside [0, 1] detected. Min: {np.min(y_prob)}, Max: {np.max(y_prob)}. Clipping.")
+              y_prob = np.clip(y_prob, 0, 1)
+         if not (np.all(y_prob >= 0) and np.all(y_prob <= 1)):
+              logging.error("ECE calculation: Probabilities are still outside [0, 1] after clipping.")
+              return np.nan
+
+    bin_edges = np.linspace(0., 1. + 1e-8, n_bins + 1)
+    bin_indices = np.digitize(y_prob, bin_edges[1:-1])
+
+    ece = 0.0
+    for bin_idx in range(n_bins):
+        in_bin_mask = (bin_indices == bin_idx)
+        bin_size = np.sum(in_bin_mask)
+
+        if bin_size > 0:
+            bin_accuracy = np.mean(y_true[in_bin_mask])
+            bin_confidence = np.mean(y_prob[in_bin_mask])
+            bin_weight = bin_size / n_samples
+            ece += bin_weight * np.abs(bin_accuracy - bin_confidence)
+
+    return ece
