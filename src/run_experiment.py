@@ -116,8 +116,10 @@ def main():
     gen_args_map = { "model_name": {"arg": "--model_name"}, "base_model": {"arg": "--base_model"}, "dataset": {"arg": "--dataset"}, "num_samples": {"arg": "--num_samples"}, "num_few_shot": {"arg": "--num_few_shot"}, "temperature": {"arg": "--temperature"}, "top_p": {"arg": "--top_p"}, "enable_brief": {"arg": "--enable_brief", "is_flag": True}, "brief_prompt": {"arg": "--brief_prompt"}, "use_context": {"arg": "--use_context", "is_flag": True}, "metric": {"arg": "--metric"}, "seed": {"arg": "--random_seed"}, "compute_p_true": {"arg": "--compute_p_true", "is_flag": True}, "p_true_num_fewshot": {"arg": "--p_true_num_fewshot"}, "model_max_new_tokens": {"arg": "--model_max_new_tokens"}, "brief_always": {"arg": "--brief_always", "is_flag": True} }
     se_args_map = { "entailment_model": {"arg": "--entailment_model"}, "strict_entailment": {"arg": "--strict_entailment", "is_flag": True}, "condition_on_question": {"arg": "--condition_on_question", "is_flag": True}, "num_generations": {"arg": "--use_num_generations"}, "use_all_generations_se": {"arg": "--use_all_generations", "is_flag": True}, "num_samples": {"arg": "--num_eval_samples"} }
     is_args_map = {
+        "probe_classifier": {"arg": "--classifier"},
         "probe_n_splits": {"arg": "--n_splits"},
-        "probe_seed": {"arg": "--seed"}
+        "probe_seed": {"arg": "--seed"},
+        "probe_accuracy_threshold": {"arg": "--probe_accuracy_threshold"}
     }
 
     hybrid_meta_train_args_map = {}
@@ -152,6 +154,13 @@ def main():
         if gen_output_pkl.exists():
              stage_args = construct_args(config, is_args_map)
              positional_args = [run_id]; stage_args.extend(["--base_dir", str(run_output_dir)])
+             if "--classifier" not in stage_args:
+                 default_classifier = config.get("probe_classifier", "logistic")
+                 stage_args.extend(["--classifier", default_classifier])
+             if "--probe_accuracy_threshold" not in stage_args:
+                 default_threshold = config.get("probe_accuracy_threshold", 0.5)
+                 stage_args.extend(["--probe_accuracy_threshold", str(default_threshold)])
+
              full_args = positional_args + stage_args
              success &= run_stage("probe_is", script_path, config, full_args)
              if not success: sys.exit(1)
@@ -183,7 +192,8 @@ def main():
              stage_args.extend(["--output_json", str(auroc_json_output)])
              full_args = positional_args + stage_args
              success &= run_stage("calculate_aurocs", script_path, config, full_args)
-         else: logging.warning("Inputs missing for calculate_aurocs. Skipping.")
+         else:
+             logging.warning("Inputs missing for calculate_aurocs. Skipping.")
 
     # Stage 6: Prepare Analysis Dataset (for Subtypes)
     if run_flags.get("prepare_analysis", False):
