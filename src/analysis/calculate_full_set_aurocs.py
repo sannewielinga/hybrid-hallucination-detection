@@ -1,4 +1,3 @@
-# src/analysis/calculate_full_set_aurocs.py
 import argparse
 import logging
 from pathlib import Path
@@ -12,7 +11,6 @@ from src.utils.logging_utils import setup_logger
 from src.utils.utils import load_pickle
 from src.utils.eval_utils import aurac, rejection_accuracy_curve, calculate_ece
 
-
 def save_plot(figure, filepath):
     try:
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -22,7 +20,6 @@ def save_plot(figure, filepath):
         logging.error(f"Failed to save plot {filepath}: {e}")
     finally:
         plt.close(figure)
-
 
 def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plots=True, n_ece_bins=10):
     setup_logger()
@@ -85,6 +82,7 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
 
         scores_dict = {'id': [str(tid).strip() for tid in task_ids_ordered]}
         scores_dict['semantic_entropy'] = get_data_aligned('semantic_entropy', measures, num_tasks)
+        scores_dict['normalized_semantic_entropy'] = get_data_aligned('normalized_semantic_entropy', measures, num_tasks)
         scores_dict['naive_entropy'] = get_data_aligned('regular_entropy', measures, num_tasks)
 
         p_true_score_key = None
@@ -122,11 +120,15 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
         merged_df[se_norm_col], merged_df[is_norm_col] = np.nan, np.nan
         se_valid_mask = merged_df[se_col].notna(); is_valid_mask = merged_df[is_col].notna()
         if se_valid_mask.any():
-            try: merged_df.loc[se_valid_mask, se_norm_col] = scaler_se.fit_transform(merged_df.loc[se_valid_mask, [se_col]])
-            except ValueError: merged_df.loc[se_valid_mask, se_norm_col] = 0.5
+            try:
+                merged_df.loc[se_valid_mask, se_norm_col] = scaler_se.fit_transform(merged_df.loc[se_valid_mask, [se_col]])
+            except ValueError:
+                merged_df.loc[se_valid_mask, se_norm_col] = 0.5
         if is_valid_mask.any():
-            try: merged_df.loc[is_valid_mask, is_norm_col] = scaler_is.fit_transform(merged_df.loc[is_valid_mask, [is_col]])
-            except ValueError: merged_df.loc[is_valid_mask, is_norm_col] = 0.5
+            try:
+                merged_df.loc[is_valid_mask, is_norm_col] = scaler_is.fit_transform(merged_df.loc[is_valid_mask, [is_col]])
+            except ValueError:
+                merged_df.loc[is_valid_mask, is_norm_col] = 0.5
         merged_df[hybrid_simple_col] = 0.5 * merged_df[se_norm_col] + 0.5 * merged_df[is_norm_col]
     else:
         merged_df[hybrid_simple_col] = np.nan
@@ -141,6 +143,7 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
     results = {}
     methods_to_calc = {
         'SE': 'semantic_entropy',
+        'NSE': 'normalized_semantic_entropy',
         'Naive': 'naive_entropy',
         'IS Probe': 'internal_signal_score',
         'Hybrid (Simple Avg)': hybrid_simple_col,
@@ -184,6 +187,9 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
                     logging.warning(f"AUROC for {method_name} is {auroc_val:.4f} (<0.5). Assuming lower score means incorrect. Flipping score for metrics.")
                     y_score_for_auroc_auprc = -y_score_for_auroc_auprc
                     auroc_val = roc_auc_score(y_true_incorrect_valid, y_score_for_auroc_auprc)
+            except ValueError:
+                 logging.warning(f"AUROC ValueError for {method_name} (possibly constant scores). Setting AUROC to NaN.")
+                 auroc_val = np.nan
             except Exception as e:
                 logging.error(f"AUROC calculation error for {method_name}: {e}"); auroc_val = np.nan
             logging.info(f"  AUROC {method_name}: {auroc_val:.4f}")
@@ -195,6 +201,9 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
                 else:
                     logging.warning(f"Invalid precision/recall arrays for AUPRC {method_name}. Setting AUPRC to NaN.")
                     auprc_val = np.nan
+            except ValueError:
+                 logging.warning(f"AUPRC ValueError for {method_name} (possibly constant scores). Setting AUPRC to NaN.")
+                 auprc_val = np.nan
             except Exception as e:
                 logging.error(f"AUPRC calculation error for {method_name}: {e}"); auprc_val = np.nan
             logging.info(f"  AUPRC {method_name}: {auprc_val:.4f}")
@@ -203,7 +212,7 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
             if method_name == 'P(True)':
                  y_score_for_aurac = 1.0 - y_score_raw_valid
                  logging.info(f"Transforming P(True) score to P(False) for AURAC calculation.")
-            elif auroc_val > 0.5 and np.any(y_score_raw_valid != y_score_for_auroc_auprc):
+            elif not np.isnan(auroc_val) and auroc_val > 0.5 and np.any(y_score_raw_valid != y_score_for_auroc_auprc):
                  logging.warning(f"Using negatively correlated score for AURAC for {method_name} based on AUROC result.")
                  y_score_for_aurac = -y_score_raw_valid
 
@@ -215,8 +224,14 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
 
             y_prob_for_ece = y_score_for_auroc_auprc
             is_probability = False
-            with np.errstate(invalid='ignore'):
-                 is_probability = np.all((y_prob_for_ece >= 0) & (y_prob_for_ece <= 1))
+            try:
+                valid_prob_mask = ~np.isnan(y_prob_for_ece)
+                if valid_prob_mask.any():
+                    with np.errstate(invalid='ignore'):
+                        is_probability = np.all((y_prob_for_ece[valid_prob_mask] >= 0) & (y_prob_for_ece[valid_prob_mask] <= 1))
+            except Exception as e:
+                 logging.error(f"Error checking if scores are probabilities for {method_name}: {e}")
+                 is_probability = False
 
             if is_probability:
                  try:
@@ -225,7 +240,7 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
                     logging.error(f"ECE calculation error for {method_name}: {e}"); ece_val = np.nan
                  logging.info(f"  ECE   {method_name}: {ece_val:.4f}")
             elif method_name in ['IS Probe', 'Hybrid (Meta)', 'P(True)']:
-                 logging.error(f"Scores for {method_name} are expected to be probabilities but are not in [0, 1]. Min: {np.min(y_prob_for_ece):.4f}, Max: {np.max(y_prob_for_ece):.4f}. Cannot calculate ECE reliably.")
+                 logging.error(f"Scores for {method_name} are expected to be probabilities but are not in [0, 1] or contain NaNs. Min: {np.nanmin(y_prob_for_ece):.4f}, Max: {np.nanmax(y_prob_for_ece):.4f}. Cannot calculate ECE reliably.")
                  ece_val = np.nan
             else:
                  logging.info(f"Skipping ECE for {method_name} as scores are not probabilities.")
@@ -252,7 +267,7 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
                         ax_rej.text(0.05, 0.1, f'AURAC = {aurac_val:.4f}', transform=ax_rej.transAxes,
                                     bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
 
-                        plot_filename_rej = plot_dir / f"{run_id}_{method_name}_RejectionCurve.png"
+                        plot_filename_rej = plot_dir / f"{run_id}_{method_name.replace(' ', '_').replace('(', '').replace(')', '')}_RejectionCurve.png" # Sanitize name
                         save_plot(fig_rej, plot_filename_rej)
                     else:
                         logging.warning(f"No valid accuracy points to plot rejection curve for {method_name}.")
@@ -286,7 +301,6 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
         except Exception as e:
             logging.error(f"Failed to save results JSON: {e}")
     return results
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Calculate full-set AUROC, AUPRC, AURAC, and ECE.")
