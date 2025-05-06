@@ -174,6 +174,10 @@ def main():
         if uncertainty_pkl.exists() and is_scores_all_csv.exists():
              stage_args = construct_args(config, hybrid_meta_train_args_map)
              positional_args = [run_id, str(run_output_dir)]
+             if "--meta_classifier" not in stage_args:
+                 default_meta_classifier = config.get("meta_classifier", "logistic")
+                 stage_args.extend(["--meta_classifier", default_meta_classifier])
+
              full_args = positional_args + stage_args
              success &= run_stage("train_hybrid_meta", script_path, config, full_args)
              if not success: sys.exit(1)

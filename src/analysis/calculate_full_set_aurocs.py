@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc
+from sklearn.model_selection import StratifiedKFold
 import json
 import matplotlib.pyplot as plt
 from src.utils.logging_utils import setup_logger
@@ -12,6 +13,13 @@ from src.utils.utils import load_pickle
 from src.utils.eval_utils import aurac, rejection_accuracy_curve, calculate_ece
 
 def save_plot(figure, filepath):
+    """
+    Saves the given matplotlib figure to the given filepath.
+
+    Args:
+        figure: The matplotlib figure to save.
+        filepath: The path to save the figure to.
+    """
     try:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(filepath, bbox_inches="tight", dpi=150)
@@ -21,16 +29,27 @@ def save_plot(figure, filepath):
     finally:
         plt.close(figure)
 
-def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plots=True, n_ece_bins=10):
+def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plots=True, n_ece_bins=10, n_splits=5, random_seed=42):
+    """
+    Calculates and returns AUROC, AUPRC, AURAC, and ECE metrics for each uncertainty method on the full validation set.
+    The Hybrid (Simple Avg) score is calculated using n_splits-fold cross-validation.
+    The Hybrid (Meta) score uses the 'hybrid_meta_score' column in the input CSV (if available).
+    The P(True) score is derived from the 'p_false_fixed' or 'p_true_logprob' columns in the input CSV.
+    The IS Probe score uses the 'internal_signal_score' column in the input CSV.
+    The Naive score uses the 'naive_entropy' column in the input CSV.
+    The SE and NSE scores use the 'semantic_entropy' and 'normalized_semantic_entropy' columns in the input CSV, respectively.
+    If the 'gt_incorrect' and 'gt_correct' columns are present in the input CSV, they are used as ground truth labels.
+    If the 'id' column is present in the input CSV, it is used to match the validation set with the uncertainty data.
+    The results are saved to the output JSON path if specified.
+    """
     setup_logger()
     run_dir = Path(run_dir)
-    logging.info(f"--- Calculating Full-Set AUROC, AUPRC, AURAC & ECE for Run: {run_id} ---")
+    logging.info(f"--- Calculating Full-Set Metrics (OOF Hybrid Simple Avg) for Run: {run_id} ---")
 
     uncertainty_path = run_dir / "uncertainty_measures.pkl"
     generations_path = run_dir / "validation_generations.pkl"
     is_scores_path = run_dir / f"{run_id}_internal_signal_scores_all.csv"
     hybrid_meta_path = run_dir / f"{run_id}_hybrid_meta_scores_all.csv"
-
     uncertainty_data = load_pickle(uncertainty_path)
     generations_data = load_pickle(generations_path)
     df_is = None
@@ -47,7 +66,8 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
     else:
          logging.warning(f"Hybrid meta scores file missing: {hybrid_meta_path}")
 
-    if uncertainty_data is None or generations_data is None:
+    if uncertainty_data is None or generations_data is None or df_is is None:
+        logging.error("Cannot proceed without uncertainty, generations, and IS score data.")
         return None
 
     try:
@@ -97,7 +117,7 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
             p_true_score_key = 'p_true_score'
             logging.info("Using 'p_true_logprob' to derive P(True) score.")
         else:
-            logging.warning("No suitable P(True) data found for ECE calculation (expected 'p_false_fixed' or 'p_true_logprob').")
+            logging.warning("No suitable P(True) data found.")
 
         df_main = pd.DataFrame(scores_dict)
 
@@ -112,27 +132,64 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
     merged_df['gt_incorrect'] = ground_truth_incorrect
     merged_df['gt_correct'] = ground_truth_correct
 
-    se_col, is_col, hybrid_simple_col = 'semantic_entropy', 'internal_signal_score', 'hybrid_simple_score'
-    if se_col in merged_df.columns and is_col in merged_df.columns:
-        logging.info("Calculating simple hybrid score for full set...")
-        scaler_se, scaler_is = MinMaxScaler(), MinMaxScaler()
-        se_norm_col, is_norm_col = f"{se_col}_norm", f"{is_col}_norm"
-        merged_df[se_norm_col], merged_df[is_norm_col] = np.nan, np.nan
-        se_valid_mask = merged_df[se_col].notna(); is_valid_mask = merged_df[is_col].notna()
-        if se_valid_mask.any():
+    logging.info(f"Calculating OOF Hybrid (Simple Avg) score using {n_splits}-Fold CV...")
+    hybrid_simple_col = 'hybrid_simple_score'
+    merged_df[hybrid_simple_col] = np.nan 
+
+    df_for_cv = merged_df.dropna(subset=['semantic_entropy', 'internal_signal_score', 'gt_incorrect']).copy()
+    if len(df_for_cv) >= n_splits and len(df_for_cv['gt_incorrect'].unique()) > 1:
+        X_se = df_for_cv['semantic_entropy'].values
+        X_is = df_for_cv['internal_signal_score'].values
+        y_cv = df_for_cv['gt_incorrect'].astype(bool).values
+        ids_cv = df_for_cv['id'].values
+
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+        oof_hybrid_simple_scores = np.full(len(y_cv), np.nan)
+        oof_indices_cv = np.full(len(y_cv), -1, dtype=int)
+
+        for fold_idx, (train_index, test_index) in enumerate(skf.split(np.zeros_like(y_cv), y_cv)):
+            X_se_train, X_se_test = X_se[train_index], X_se[test_index]
+            X_is_train, X_is_test = X_is[train_index], X_is[test_index]
+            y_train_fold = y_cv[train_index]
+
+            if len(np.unique(y_train_fold)) < 2:
+                 logging.warning(f"Fold {fold_idx + 1}: Training split for simple avg CV has only one class. Skipping fold.")
+                 oof_indices_cv[test_index] = test_index
+                 continue
+
+            scaler_se_fold = MinMaxScaler()
+            scaler_is_fold = MinMaxScaler()
+
             try:
-                merged_df.loc[se_valid_mask, se_norm_col] = scaler_se.fit_transform(merged_df.loc[se_valid_mask, [se_col]])
+                X_se_train_norm = scaler_se_fold.fit_transform(X_se_train.reshape(-1, 1))
+                X_se_test_norm = scaler_se_fold.transform(X_se_test.reshape(-1, 1))
             except ValueError:
-                merged_df.loc[se_valid_mask, se_norm_col] = 0.5
-        if is_valid_mask.any():
+                logging.warning(f"Fold {fold_idx + 1} (SimpleAvg): SE constant. Using 0.5.")
+                X_se_test_norm = np.full_like(X_se_test.reshape(-1, 1), 0.5)
+
             try:
-                merged_df.loc[is_valid_mask, is_norm_col] = scaler_is.fit_transform(merged_df.loc[is_valid_mask, [is_col]])
+                X_is_train_norm = scaler_is_fold.fit_transform(X_is_train.reshape(-1, 1))
+                X_is_test_norm = scaler_is_fold.transform(X_is_test.reshape(-1, 1))
             except ValueError:
-                merged_df.loc[is_valid_mask, is_norm_col] = 0.5
-        merged_df[hybrid_simple_col] = 0.5 * merged_df[se_norm_col] + 0.5 * merged_df[is_norm_col]
+                logging.warning(f"Fold {fold_idx + 1} (SimpleAvg): IS constant. Using 0.5.")
+                X_is_test_norm = np.full_like(X_is_test.reshape(-1, 1), 0.5)
+
+            oof_hybrid_simple_scores_fold = 0.5 * X_se_test_norm.flatten() + 0.5 * X_is_test_norm.flatten()
+            oof_hybrid_simple_scores[test_index] = oof_hybrid_simple_scores_fold
+            oof_indices_cv[test_index] = test_index
+
+        df_hybrid_simple_oof = pd.DataFrame({
+            'id': ids_cv[oof_indices_cv != -1],
+            hybrid_simple_col: oof_hybrid_simple_scores[oof_indices_cv != -1]
+        })
+        merged_df.set_index('id', inplace=True)
+        merged_df.update(df_hybrid_simple_oof.set_index('id'))
+        merged_df.reset_index(inplace=True)
+        logging.info(f"Calculated OOF {hybrid_simple_col} for {len(df_hybrid_simple_oof)} samples.")
+
     else:
-        merged_df[hybrid_simple_col] = np.nan
-        logging.warning(f"Cannot calculate simple hybrid score; missing '{se_col}' or '{is_col}'.")
+         logging.warning("Not enough data or classes to perform K-Fold CV for Hybrid (Simple Avg). Skipping.")
+
 
     plot_dir = None
     if save_plots:
@@ -267,7 +324,7 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
                         ax_rej.text(0.05, 0.1, f'AURAC = {aurac_val:.4f}', transform=ax_rej.transAxes,
                                     bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
 
-                        plot_filename_rej = plot_dir / f"{run_id}_{method_name.replace(' ', '_').replace('(', '').replace(')', '')}_RejectionCurve.png" # Sanitize name
+                        plot_filename_rej = plot_dir / f"{run_id}_{method_name.replace(' ', '_').replace('(', '').replace(')', '')}_RejectionCurve.png"
                         save_plot(fig_rej, plot_filename_rej)
                     else:
                         logging.warning(f"No valid accuracy points to plot rejection curve for {method_name}.")
@@ -303,12 +360,15 @@ def calculate_full_set_metrics(run_id, run_dir, output_json_path=None, save_plot
     return results
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Calculate full-set AUROC, AUPRC, AURAC, and ECE.")
+    parser = argparse.ArgumentParser(description="Calculate full-set AUROC, AUPRC, AURAC, and ECE, with OOF Simple Hybrid.")
     parser.add_argument("run_id", type=str)
     parser.add_argument("run_dir", type=str)
     parser.add_argument("--output_json", type=str, default=None, help="Optional path to save results JSON.")
     parser.add_argument("--save_plots", action="store_true", help="Save rejection curve plots.")
     parser.add_argument("--ece_bins", type=int, default=10, help="Number of bins for ECE calculation.")
+    parser.add_argument("--n_splits", type=int, default=5, help="Number of folds for K-Fold CV (used for OOF Simple Hybrid).")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for CV split.")
+
     args = parser.parse_args()
 
     output_path = args.output_json or Path(args.run_dir) / f"{args.run_id}_full_set_metrics.json"
@@ -317,5 +377,7 @@ if __name__ == "__main__":
         args.run_dir,
         output_path,
         args.save_plots,
-        n_ece_bins=args.ece_bins
+        n_ece_bins=args.ece_bins,
+        n_splits=args.n_splits,
+        random_seed=args.seed
     )
