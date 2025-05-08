@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 import numpy as np
 import torch
+import pandas as pd
 
 from src.utils.data_utils import load_ds
 from src.utils.p_ik import get_p_ik
@@ -101,28 +102,63 @@ def main(args):
 
         example = validation_generations[tid]
         most_likely_answer = example.get("most_likely_answer", {})
-        accuracy = most_likely_answer.get("accuracy")
+
+        metric_score_raw = most_likely_answer.get("accuracy_metric_score")
+        is_correct_derived = most_likely_answer.get("is_correct")
 
         if args.recompute_accuracy and metric is not None:
             response_text = most_likely_answer.get("response")
             if response_text and response_text != "[PREDICTION FAILED]":
-                try: acc = metric(response_text, example, None)
-                except Exception as e: logging.warning(f"Metric recalculation failed for ID {tid}: {e}"); acc = 0.0
-            else: acc = 0.0
-            accuracy = acc
-        elif accuracy is None:
-            logging.warning(f"Accuracy missing for ID {tid}. Assuming incorrect."); accuracy = 0.0
+                try:
+                    metric_score_raw = metric(response_text, example, None)
+                    is_correct_derived = metric_score_raw > args.metric_threshold
+                except Exception as e:
+                    logging.warning(f"Metric recalculation failed for ID {tid}: {e}")
+                    metric_score_raw = 0.0; is_correct_derived = False
+            else:
+                 metric_score_raw = 0.0; is_correct_derived = False
+        elif is_correct_derived is None:
+            if metric_score_raw is not None and not pd.isna(metric_score_raw):
+                 logging.warning(f"Correctness label missing for ID {tid}, deriving from score using threshold {args.metric_threshold}.")
+                 is_correct_derived = metric_score_raw > args.metric_threshold
+            else:
+                 logging.warning(f"Accuracy score missing for ID {tid}. Assuming incorrect."); is_correct_derived = False
 
-        is_correct = accuracy > args.probe_accuracy_threshold
-        validation_is_true.append(is_correct)
+        validation_is_true.append(is_correct_derived)
 
         if args.compute_p_ik or args.compute_p_ik_answerable:
-            embedding = most_likely_answer.get("embedding")
-            if embedding is not None:
+            embedding_data_obj = most_likely_answer.get("embedding")
+
+            embedding_for_pik = None
+            if isinstance(embedding_data_obj, dict):
+                if 'layer_-1' in embedding_data_obj and embedding_data_obj['layer_-1'] is not None:
+                    embedding_for_pik = embedding_data_obj['layer_-1']
+                else:
+                    logging.warning(f"P(IK) for {tid}: 'layer_-1' not found or None in embedding dict. Looking for other layers.")
+                    potential_keys = [k for k,v in embedding_data_obj.items() if k.startswith("layer_") and v is not None]
+                    if potential_keys:
+                        try:
+                            sorted_fallback_keys = sorted(potential_keys, key=lambda x: int(x.split('_')[1]))
+                            if sorted_fallback_keys:
+                                embedding_for_pik = embedding_data_obj[sorted_fallback_keys[-1]]
+                                logging.info(f"P(IK) for {tid}: Using {sorted_fallback_keys[-1]} as fallback.")
+                        except (ValueError, IndexError):
+                            if potential_keys:
+                                 embedding_for_pik = embedding_data_obj[sorted(potential_keys)[0]]
+                                 logging.info(f"P(IK) for {tid}: Using alphanumerically first key {sorted(potential_keys)[0]} as fallback.")
+            elif embedding_data_obj is not None:
+                embedding_for_pik = embedding_data_obj
+
+            if embedding_for_pik is not None:
                 try:
-                    if isinstance(embedding, torch.Tensor): validation_embeddings.append(embedding.cpu())
-                    else: validation_embeddings.append(torch.tensor(embedding).cpu())
-                except Exception: logging.warning("Could not convert embedding to tensor for ID %s", tid)
+                    if isinstance(embedding_for_pik, torch.Tensor):
+                        validation_embeddings.append(embedding_for_pik.cpu().flatten())
+                    else:
+                        validation_embeddings.append(torch.tensor(embedding_for_pik).cpu().flatten())
+                except Exception as e_conv_pik:
+                    logging.warning(f"Could not convert/append embedding to tensor for P(IK) for ID {tid}: {e_conv_pik}")
+            else:
+                logging.warning(f"P(IK) for {tid}: No suitable embedding found after checking dict/old format.")
 
         validation_answerable.append(is_answerable(example))
 
@@ -169,11 +205,12 @@ def main(args):
                             if num_clusters <= 1:
                                 normalized_se_val = 0.0
                             else:
-                                max_entropy = np.log2(num_clusters)
+                                max_entropy = np.log(num_clusters)
                                 if max_entropy > 1e-9 and not np.isnan(se_val):
-                                    normalized_se_val = se_val / max_entropy
+                                     normalized_se_val = se_val / max_entropy
                                 else:
-                                    normalized_se_val = np.nan
+                                     normalized_se_val = np.nan
+
                         else:
                             se_val = np.nan
                             normalized_se_val = np.nan
@@ -213,16 +250,45 @@ def main(args):
 
         for tid_train, train_example in train_items:
             train_most_likely = train_example.get("most_likely_answer", {})
-            train_acc = train_most_likely.get("accuracy")
-            train_emb = train_most_likely.get("embedding")
-            if train_acc is not None and train_emb is not None:
-                train_is_true.append(train_acc > args.probe_accuracy_threshold)
+            train_metric_score_raw = train_most_likely.get("accuracy_metric_score")
+            train_is_correct_derived = train_most_likely.get("is_correct")
+            train_emb_data_obj = train_most_likely.get("embedding")
+
+            if train_is_correct_derived is None:
+                 if train_metric_score_raw is not None and not pd.isna(train_metric_score_raw):
+                     train_is_correct_derived = train_metric_score_raw > args.metric_threshold
+                 else:
+                     train_is_correct_derived = False
+
+            embedding_for_pik_train = None
+            if isinstance(train_emb_data_obj, dict):
+                if 'layer_-1' in train_emb_data_obj and train_emb_data_obj['layer_-1'] is not None:
+                    embedding_for_pik_train = train_emb_data_obj['layer_-1']
+                else:
+                    logging.warning(f"P(IK) Train for {tid_train}: 'layer_-1' missing/None. Fallback needed.")
+                    potential_keys_train = [k for k,v in train_emb_data_obj.items() if k.startswith("layer_") and v is not None]
+                    if potential_keys_train:
+                        try:
+                            sorted_fallback_keys_train = sorted(potential_keys_train, key=lambda x: int(x.split('_')[1]))
+                            if sorted_fallback_keys_train: embedding_for_pik_train = train_emb_data_obj[sorted_fallback_keys_train[-1]]
+                        except (ValueError, IndexError):
+                            if potential_keys_train: embedding_for_pik_train = train_emb_data_obj[sorted(potential_keys_train)[0]]
+
+            elif train_emb_data_obj is not None:
+                embedding_for_pik_train = train_emb_data_obj
+
+            if train_is_correct_derived is not None and embedding_for_pik_train is not None:
+                train_is_true.append(train_is_correct_derived)
                 train_answerable.append(is_answerable(train_example))
                 try:
-                    if isinstance(train_emb, torch.Tensor): train_embeddings.append(train_emb.cpu())
-                    else: train_embeddings.append(torch.tensor(train_emb).cpu())
-                except Exception: logging.warning(f"Skipping training embedding for {tid_train}, cannot convert.")
-            else: logging.warning(f"Skipping P(IK) training sample {tid_train}, missing accuracy or embedding.")
+                    if isinstance(embedding_for_pik_train, torch.Tensor):
+                        train_embeddings.append(embedding_for_pik_train.cpu().flatten())
+                    else:
+                        train_embeddings.append(torch.tensor(embedding_for_pik_train).cpu().flatten())
+                except Exception as e_conv_pik_train:
+                     logging.warning(f"Could not convert/append embedding to tensor for P(IK) Train for ID {tid_train}: {e_conv_pik_train}")
+            else:
+                logging.warning(f"Skipping P(IK) training sample {tid_train}, missing accuracy label or suitable embedding.")
 
         train_is_false = [not b for b in train_is_true]
         train_unanswerable = [not b for b in train_answerable]
@@ -310,8 +376,8 @@ if __name__ == "__main__":
     parser.add_argument("--compute_p_ik", action="store_true", default=False)
     parser.add_argument("--compute_p_ik_answerable", action="store_true", default=False)
     parser.add_argument("--recompute_accuracy", action="store_true", default=False)
-    parser.add_argument("--metric", default="squad", help="Metric for recomputing accuracy")
-    parser.add_argument("--probe_accuracy_threshold", type=float, default=0.5, help="Threshold for 'is_correct' label")
+    parser.add_argument("--metric", default="squad", help="Metric for accuracy calculation")
+    parser.add_argument("--metric_threshold", type=float, required=True, help="Metric threshold defining correctness.")
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--entailment_cache_id", default=None)
     parser.add_argument("--entailment_cache_only", action="store_true", default=False)

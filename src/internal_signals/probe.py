@@ -13,63 +13,140 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from src.utils.logging_utils import setup_logger
 from src.utils.utils import load_pickle
 
-def prepare_probe_data(generations_data, accuracy_threshold=0.5):
-    """
-    Prepare the data for internal signal probing.
+def prepare_probe_data(generations_data, metric_threshold):
+    hidden_states_list = []
+    labels = []
+    task_ids = []
+    logging.info("Preparing data for internal signal probe (multi-layer aware)...")
+    processed_count = 0
+    skipped_count = 0
 
-    Parameters
-    ----------
-    generations_data : dict
-        The generations data loaded from a pickle file.
-    accuracy_threshold : float, default=0.5
-        The accuracy threshold above which a generation is considered correct.
+    sorted_layer_keys_to_use = None
+    first_valid_embedding_dict = None
 
-    Returns
-    -------
-    hidden_states : list of torch.Tensors
-        The internal hidden state embeddings.
-    labels : list of bool
-        The labels (True if correct, False otherwise) for each task.
-    task_ids : list of str
-        The task IDs corresponding to the above data.
-    """
-    hidden_states = []; labels = []; task_ids = []
-    logging.info("Preparing data for internal signal probe...")
-    processed_count = 0; skipped_count = 0
+    for task_id_inspect in generations_data:
+        candidate_embedding_obj = generations_data[task_id_inspect].get("most_likely_answer", {}).get("embedding")
+        if isinstance(candidate_embedding_obj, dict) and candidate_embedding_obj:
+            valid_candidate = True
+            for k, v_emb in candidate_embedding_obj.items():
+                if not k.startswith("layer_") or v_emb is None:
+                    pass
+            if any(v is not None for v in candidate_embedding_obj.values()):
+                 first_valid_embedding_dict = candidate_embedding_obj
+                 break
+
+    if first_valid_embedding_dict:
+        potential_keys = [k for k,v in first_valid_embedding_dict.items() if k.startswith("layer_") and v is not None]
+        try:
+            sorted_layer_keys_to_use = sorted(potential_keys, key=lambda x: int(x.split('_')[1]))
+        except (ValueError, IndexError):
+            logging.warning(f"Could not parse layer indices numerically from keys: {potential_keys}. Using alphanumeric sort.")
+            sorted_layer_keys_to_use = sorted(potential_keys)
+        if sorted_layer_keys_to_use:
+            logging.info(f"IS Probe will use embeddings from layers in this order: {sorted_layer_keys_to_use}")
+        else:
+            logging.error("No valid layer embedding keys (e.g., 'layer_-1' with non-None tensor) found in the first sample's embedding dictionary.")
+            return None, None, None
+    else:
+        logging.error("Could not find any valid dictionary-based embeddings in generations_data to determine layer structure for IS probe.")
+        return None, None, None
+
+    expected_embedding_dim_per_layer = None
+    if sorted_layer_keys_to_use:
+        try:
+            first_emb_tensor_example = first_valid_embedding_dict[sorted_layer_keys_to_use[0]]
+            if isinstance(first_emb_tensor_example, torch.Tensor):
+                expected_embedding_dim_per_layer = first_emb_tensor_example.numel()
+            elif isinstance(first_emb_tensor_example, (np.ndarray, list)):
+                 expected_embedding_dim_per_layer = torch.tensor(first_emb_tensor_example).numel()
+        except Exception as e_dim:
+            logging.error(f"Could not determine embedding dimension: {e_dim}")
+            return None, None, None
+
+
     for task_id, task_details in generations_data.items():
         try:
             most_likely = task_details.get("most_likely_answer", {})
-            embedding = most_likely.get("embedding"); accuracy = most_likely.get("accuracy")
-            if embedding is not None and accuracy is not None:
-                try:
-                    if isinstance(embedding, torch.Tensor): hs_tensor = embedding.cpu()
-                    else: hs_tensor = torch.tensor(embedding).cpu()
-                    hidden_states.append(hs_tensor)
-                    is_correct = accuracy > accuracy_threshold; labels.append(is_correct); task_ids.append(task_id); processed_count += 1
-                except Exception as conversion_e: logging.warning(f"Could not process embedding for {task_id}: {conversion_e}. Skipping."); skipped_count += 1; continue
-            else: logging.warning(f"Task {task_id} missing embedding/accuracy. Skipping."); skipped_count += 1
-        except Exception as e: logging.error(f"Error processing task {task_id}: {e}. Skipping."); skipped_count += 1
-    logging.info(f"Data preparation complete. Processed: {processed_count}, Skipped: {skipped_count}")
-    if not hidden_states: logging.error("No valid hidden states extracted."); return None, None, None
-    return hidden_states, labels, task_ids
+            embedding_obj = most_likely.get("embedding")
+            metric_score_raw = most_likely.get("accuracy_metric_score")
+
+            if isinstance(embedding_obj, dict) and metric_score_raw is not None and not pd.isna(metric_score_raw):
+                concatenated_embeddings_for_sample = []
+                valid_sample_embeddings = True
+                for layer_key in sorted_layer_keys_to_use:
+                    layer_emb_tensor = embedding_obj.get(layer_key)
+
+                    if layer_emb_tensor is not None:
+                        try:
+                            if isinstance(layer_emb_tensor, torch.Tensor):
+                                current_emb = layer_emb_tensor.cpu().flatten()
+                            else:
+                                current_emb = torch.tensor(layer_emb_tensor).cpu().flatten()
+
+                            if expected_embedding_dim_per_layer and current_emb.numel() != expected_embedding_dim_per_layer:
+                                logging.warning(f"Task {task_id}, layer {layer_key}: Embedding dim mismatch. Expected {expected_embedding_dim_per_layer}, got {current_emb.numel()}. Filling with zeros.")
+                                current_emb = torch.zeros(expected_embedding_dim_per_layer, dtype=torch.float32)
+                            concatenated_embeddings_for_sample.append(current_emb)
+                        except Exception as e_tensor_conv:
+                            logging.warning(f"Task {task_id}, layer {layer_key}: Error processing embedding tensor: {e_tensor_conv}. Filling with zeros.")
+                            if expected_embedding_dim_per_layer:
+                                concatenated_embeddings_for_sample.append(torch.zeros(expected_embedding_dim_per_layer, dtype=torch.float32))
+                            else:
+                                valid_sample_embeddings = False; break
+                    else:
+                        logging.warning(f"Task {task_id}: Embedding for layer {layer_key} is None. Filling with zeros.")
+                        if expected_embedding_dim_per_layer:
+                             concatenated_embeddings_for_sample.append(torch.zeros(expected_embedding_dim_per_layer, dtype=torch.float32))
+                        else:
+                             valid_sample_embeddings = False; break
+
+                if valid_sample_embeddings and concatenated_embeddings_for_sample:
+                    final_concatenated_hs_tensor = torch.cat(concatenated_embeddings_for_sample)
+                    hidden_states_list.append(final_concatenated_hs_tensor)
+                    labels.append(metric_score_raw > metric_threshold)
+                    task_ids.append(task_id)
+                    processed_count += 1
+                else:
+
+                    logging.warning(f"Task {task_id}: Could not form a complete feature vector from layer embeddings. Skipping.")
+                    skipped_count += 1
+
+            elif embedding_obj is not None and not isinstance(embedding_obj, dict) and metric_score_raw is not None and not pd.isna(metric_score_raw):
+                 if len(sorted_layer_keys_to_use) == 1:
+                    try:
+                        if isinstance(embedding_obj, torch.Tensor): hs_tensor = embedding_obj.cpu().flatten()
+                        else: hs_tensor = torch.tensor(embedding_obj).cpu().flatten()
+
+                        if expected_embedding_dim_per_layer and hs_tensor.numel() != expected_embedding_dim_per_layer:
+                             logging.warning(f"Task {task_id} (old format): Dim mismatch. Expected {expected_embedding_dim_per_layer}, got {hs_tensor.numel()}. Filling.")
+                             hs_tensor = torch.zeros(expected_embedding_dim_per_layer, dtype=torch.float32)
+
+                        hidden_states_list.append(hs_tensor)
+                        labels.append(metric_score_raw > metric_threshold)
+                        task_ids.append(task_id)
+                        processed_count += 1
+                    except Exception as e_old_fmt:
+                        logging.warning(f"Task {task_id}: Error processing old format embedding: {e_old_fmt}. Skipping.")
+                        skipped_count += 1
+                 else:
+                    logging.warning(f"Task {task_id}: Non-dict embedding found but multiple layers expected by probe config. Skipping.")
+                    skipped_count += 1
+            else:
+                logging.warning(f"Task {task_id} missing embedding object or metric score. Skipping.")
+                skipped_count += 1
+        except Exception as e:
+            logging.error(f"Outer error processing task {task_id} for probe data: {e}", exc_info=True)
+            skipped_count += 1
+
+    logging.info(f"IS Probe data preparation complete. Processed: {processed_count}, Skipped: {skipped_count}, Total Attempted: {len(generations_data)}")
+    if not hidden_states_list:
+        logging.error("No valid hidden states extracted for the IS probe after multi-layer processing.")
+        return None, None, None
+
+    return hidden_states_list, labels, task_ids
 
 
 def get_classifier(classifier_name, random_seed):
-    """
-    Return a classifier object given its name and random seed.
-
-    Parameters
-    ----------
-    classifier_name : str
-        One of 'logistic', 'svm', or 'random_forest'.
-    random_seed : int
-        The random seed for the classifier.
-
-    Returns
-    -------
-    classifier : object
-        The classifier object.
-    """
     if classifier_name == 'logistic':
         logging.info("Using Logistic Regression classifier.")
         return LogisticRegression(random_state=random_seed, class_weight="balanced", max_iter=2000, solver='liblinear')
@@ -83,36 +160,7 @@ def get_classifier(classifier_name, random_seed):
         raise ValueError(f"Unsupported classifier type: {classifier_name}. Choose 'logistic', 'svm', or 'random_forest'.")
 
 
-def run_internal_signal_probe_cv(run_id, base_dir, classifier_type='logistic', n_splits=5, random_seed=42, probe_accuracy_threshold=0.5):
-    """
-    Run internal signal probe cross-validation and prediction.
-
-    This function prepares data, performs K-Fold cross-validation, evaluates
-    the performance of the internal signal probe using a specified classifier,
-    and saves the results. It also trains a final probe model on all available
-    data.
-
-    Parameters
-    ----------
-    run_id : str
-        The identifier for the current run.
-    base_dir : str
-        The base directory containing the required data files.
-    classifier_type : str, optional
-        The type of classifier to use ('logistic', 'svm', or 'random_forest').
-        Defaults to 'logistic'.
-    n_splits : int, optional
-        Number of folds for K-Fold cross-validation. Defaults to 5.
-    random_seed : int, optional
-        The random seed for reproducibility. Defaults to 42.
-    probe_accuracy_threshold : float, optional
-        The threshold for defining probe correctness. Defaults to 0.5.
-
-    Returns
-    -------
-    bool
-        True if the process completes successfully, False otherwise.
-    """
+def run_internal_signal_probe_cv(run_id, base_dir, classifier_type='logistic', n_splits=5, random_seed=42, metric_threshold=0.85):
 
     setup_logger()
     run_dir = Path(base_dir)
@@ -121,7 +169,7 @@ def run_internal_signal_probe_cv(run_id, base_dir, classifier_type='logistic', n
     generations_data = load_pickle(generations_path)
     if generations_data is None: return False
 
-    hidden_states, labels, task_ids_all = prepare_probe_data(generations_data, accuracy_threshold=probe_accuracy_threshold)
+    hidden_states, labels, task_ids_all = prepare_probe_data(generations_data, metric_threshold=metric_threshold)
 
     if hidden_states is None: return False
     if len(np.unique(labels)) < 2: logging.error("Only one class label found. Cannot train/evaluate probe."); return False
@@ -129,7 +177,7 @@ def run_internal_signal_probe_cv(run_id, base_dir, classifier_type='logistic', n
     logging.info(f"Prepared {len(hidden_states)} embeddings and labels for K-Fold CV.")
 
     try:
-        X_full = np.array([vec.numpy().flatten() for vec in hidden_states])
+        X_full = np.array([vec.numpy() for vec in hidden_states])
         y_full = np.array(labels)
         ids_full = np.array(task_ids_all)
     except Exception as e:
@@ -231,7 +279,7 @@ if __name__ == "__main__":
     parser.add_argument("--classifier", type=str, default='logistic', choices=['logistic', 'svm', 'random_forest'], help="Classifier type for the IS probe.")
     parser.add_argument("--n_splits", type=int, default=5, help="Number of folds for K-Fold CV.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
-    parser.add_argument("--probe_accuracy_threshold", type=float, default=0.5, help="Accuracy threshold for defining correctness.")
+    parser.add_argument("--metric_threshold", type=float, required=True, help="Metric threshold defining correctness.")
 
     args = parser.parse_args()
 
@@ -241,5 +289,5 @@ if __name__ == "__main__":
         classifier_type=args.classifier,
         n_splits=args.n_splits,
         random_seed=args.seed,
-        probe_accuracy_threshold=args.probe_accuracy_threshold
+        metric_threshold=args.metric_threshold
     )

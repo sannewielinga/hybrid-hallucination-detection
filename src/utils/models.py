@@ -1,11 +1,9 @@
-"""Implement HuggingfaceModel models."""
-
 import copy
 import logging
 from collections import Counter
 import torch
 import os
-
+import numpy as np
 import accelerate
 
 from transformers import AutoTokenizer
@@ -40,7 +38,6 @@ class BaseModel(ABC):
 
 
 class StoppingCriteriaSub(StoppingCriteria):
-    """Stop generations when they match a particular text or token."""
 
     def __init__(self, stops, tokenizer, match_on="text", initial_length=None):
         super().__init__()
@@ -72,7 +69,6 @@ class StoppingCriteriaSub(StoppingCriteria):
 
 
 def remove_split_layer(device_map_in):
-    """Modify device maps s.t. individual layers are not spread across devices."""
 
     device_map = copy.deepcopy(device_map_in)
     destinations = list(device_map.keys())
@@ -106,14 +102,16 @@ def remove_split_layer(device_map_in):
 
 
 class HuggingfaceModel(BaseModel):
-    """Hugging Face Model."""
 
     def __init__(
-        self, model_name, stop_sequences=None, max_new_tokens=None, base_model=None
+        self, model_name, stop_sequences=None, max_new_tokens=None, base_model=None,
+        probe_layers_to_extract=None
     ):
         if max_new_tokens is None:
             raise ValueError("max_new_tokens must be provided.")
         self.max_new_tokens = max_new_tokens
+        self.probe_layers_to_extract = probe_layers_to_extract if probe_layers_to_extract is not None else [-1]
+        logging.info(f"HuggingfaceModel configured to extract probe embeddings from layers: {self.probe_layers_to_extract}")
 
         if stop_sequences == "default":
             stop_sequences = STOP_SEQUENCES
@@ -144,7 +142,6 @@ class HuggingfaceModel(BaseModel):
         kwargs = {}
         eightbit = False
 
-        # --- Llama branch ---
         if "llama" in model_name.lower():
             if "/" in model_name:
                 org, model_part = model_name.split("/", 1)
@@ -285,14 +282,14 @@ class HuggingfaceModel(BaseModel):
             )
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-            base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_obj = AutoModelForCausalLM.from_pretrained(
                 model_name, device_map="auto", max_memory={0: "80GIB"}
             )
             adapter_config_path = os.path.join(model_name, "adapter_config.json")
             if os.path.exists(adapter_config_path):
-                self.model = PeftModel.from_pretrained(base_model, model_name)
+                self.model = PeftModel.from_pretrained(base_model_obj, model_name)
             else:
-                self.model = base_model
+                self.model = base_model_obj
         elif "ibm-granite" in model_name.lower():
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name, device_map="auto", token_type_ids=None
@@ -419,74 +416,80 @@ class HuggingfaceModel(BaseModel):
 
         if n_generated == 0:
             logging.warning(
-                "Only stop_words were generated. For likelihoods and embeddings, taking stop word instead."
+                "Only stop_words were generated. For embeddings, using state of first (potential) generated token."
             )
-            n_generated = 1
-
-        if "decoder_hidden_states" in outputs.keys():
-            hidden = outputs.decoder_hidden_states
+            effective_n_generated = 1
         else:
-            hidden = outputs.hidden_states
+            effective_n_generated = n_generated
 
-        if len(hidden) == 1:
-            logging.warning(
-                "Taking first and only generation for hidden! "
-                "n_generated: %d, n_input_token: %d, token_stop_index %d, "
-                "last_token: %s, generation was: %s",
-                n_generated,
-                n_input_token,
-                token_stop_index,
-                self.tokenizer.decode(outputs["sequences"][0][-1]),
-                full_answer,
-            )
-            last_input = hidden[0]
-        elif (n_generated - 1) >= len(hidden):
-            logging.error(
-                "Taking last state because n_generated is too large"
-                "n_generated: %d, n_input_token: %d, token_stop_index %d, "
-                "last_token: %s, generation was: %s, slice_answer: %s",
-                n_generated,
-                n_input_token,
-                token_stop_index,
-                self.tokenizer.decode(outputs["sequences"][0][-1]),
-                full_answer,
-                sliced_answer,
-            )
-            last_input = hidden[-1]
+        extracted_embeddings_dict = {}
+        all_layer_hidden_states_from_generate = outputs.get("hidden_states")
+
+        if all_layer_hidden_states_from_generate:
+            num_layers_in_output_hs = len(all_layer_hidden_states_from_generate)
+            num_tokens_in_hs_output = 0
+            if num_layers_in_output_hs > 0:
+                 num_tokens_in_hs_output = all_layer_hidden_states_from_generate[0].shape[1]
+
+            if num_tokens_in_hs_output == 0:
+                logging.warning("Hidden states from generate output have 0 generated tokens. Cannot extract embeddings.")
+                for layer_spec_idx in self.probe_layers_to_extract:
+                     extracted_embeddings_dict[f"layer_{layer_spec_idx}"] = None
+            else:
+                target_idx_in_gen_hs = min(effective_n_generated - 1, num_tokens_in_hs_output - 1)
+
+                if target_idx_in_gen_hs < 0:
+                    logging.error(f"target_idx_in_gen_hs is {target_idx_in_gen_hs}, which is invalid. Setting embeddings to None.")
+                    for layer_spec_idx in self.probe_layers_to_extract:
+                        extracted_embeddings_dict[f"layer_{layer_spec_idx}"] = None
+                else:
+                    for layer_spec_idx in self.probe_layers_to_extract:
+                        actual_layer_idx_in_tuple = layer_spec_idx
+                        if layer_spec_idx < 0:
+                            actual_layer_idx_in_tuple = num_layers_in_output_hs + layer_spec_idx
+
+                        if 0 <= actual_layer_idx_in_tuple < num_layers_in_output_hs:
+                            layer_hs_generated_tokens = all_layer_hidden_states_from_generate[actual_layer_idx_in_tuple]
+                            token_embedding_tensor = layer_hs_generated_tokens[:, target_idx_in_gen_hs, :].cpu()
+                            extracted_embeddings_dict[f"layer_{layer_spec_idx}"] = token_embedding_tensor
+                        else:
+                            logging.warning(
+                                f"Requested layer_spec_idx {layer_spec_idx} (maps to {actual_layer_idx_in_tuple}) is out of bounds "
+                                f"for {num_layers_in_output_hs} available hidden_states outputs. Skipping."
+                            )
+                            extracted_embeddings_dict[f"layer_{layer_spec_idx}"] = None
         else:
-            last_input = hidden[n_generated - 1]
-
-        last_layer = last_input[-1]
-        last_token_embedding = last_layer[:, -1, :].cpu()
+            logging.warning("No 'hidden_states' found in model.generate() output. IS Probe embeddings will be None/missing.")
+            for layer_spec_idx in self.probe_layers_to_extract:
+                extracted_embeddings_dict[f"layer_{layer_spec_idx}"] = None
 
         transition_scores = self.model.compute_transition_scores(
             outputs.sequences, outputs.scores, normalize_logits=True
         )
 
         log_likelihoods = [score.item() for score in transition_scores[0]]
-        if len(log_likelihoods) == 1:
-            logging.warning("Taking first and only generation for log likelihood!")
+        if len(log_likelihoods) == 1 and n_generated > 0:
             log_likelihoods = log_likelihoods
-        else:
+        elif n_generated > 0:
             log_likelihoods = log_likelihoods[:n_generated]
+        else:
+             log_likelihoods = []
+
 
         if len(log_likelihoods) == self.max_new_tokens:
             logging.warning("Generation interrupted by max_token limit.")
 
-        if len(log_likelihoods) == 0:
-            raise ValueError
+        if len(log_likelihoods) == 0 and n_generated > 0 :
+            logging.error("Log likelihoods are empty but n_generated > 0. This is unexpected.")
 
-        return sliced_answer, log_likelihoods, last_token_embedding
+
+        return sliced_answer, log_likelihoods, extracted_embeddings_dict
 
     def get_p_true(self, input_data):
-        """Get the probability of the model anwering A (True) for the given input."""
-
         input_data += " A"
         tokenized_prompt_true = self.tokenizer(input_data, return_tensors="pt").to(
             "cuda"
         )["input_ids"]
-        # The computation of the negative log likelihoods follows:
-        # https://huggingface.co/docs/transformers/perplexity.
 
         target_ids_true = tokenized_prompt_true.clone()
         target_ids_true[0, :-1] = -100

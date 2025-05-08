@@ -7,11 +7,10 @@ import json
 import argparse
 from pathlib import Path
 import pickle
-
+import pandas as pd
 import numpy as np
 import torch
 import wandb
-
 
 from src.utils.data_utils import load_ds
 from src.utils import utils
@@ -20,14 +19,7 @@ from src.utils import logging_utils
 
 from .compute_se import main as main_compute
 
-
 def generate_answers(args):
-    """
-    Main entry point for generating answers with a given model and dataset.
-
-    :param args: The parsed arguments from the command line.
-    :return: None
-    """
     logging_utils.setup_logger()
     logging.info(f"Starting answer generation with args: {args}")
 
@@ -92,12 +84,13 @@ def generate_answers(args):
     logging.info("Few-shot prompt constructed.")
 
     logging.info("Initializing model...")
-    model = utils.init_model(args)  # Pass args object
+    model = utils.init_model(args)
     if model is None:
         logging.error("Failed to initialize model.")
         return
 
     p_true_few_shot_prompt = None
+    p_true_responses_for_prompt_construction = {} # Store responses used ONLY for prompt construction if needed later
     if args.compute_p_true:
         logging.info("Constructing few-shot prompt for P(True)...")
         available_for_ptrue = list(set(remaining_answerable))
@@ -116,7 +109,7 @@ def generate_answers(args):
             p_true_indices = random.sample(available_for_ptrue, num_ptrue_fewshot)
             remaining_answerable = list(set(remaining_answerable) - set(p_true_indices))
 
-            p_true_few_shot_prompt, p_true_responses, len_p_true = (
+            p_true_few_shot_prompt, p_true_responses_for_prompt_construction, len_p_true = (
                 p_true_utils.construct_few_shot_prompt(
                     model=model,
                     dataset=train_dataset,
@@ -126,20 +119,18 @@ def generate_answers(args):
                     brief_always=is_brief_always,
                     make_prompt=make_prompt,
                     num_generations=args.num_generations,
-                    metric=metric,
+                    metric=lambda pred, ex, mdl: utils.get_metric(args.metric)(pred, ex, mdl) > args.metric_threshold, # Pass a boolean lambda
                     top_p=args.top_p,
                 )
             )
             experiment_details["p_true_indices"] = p_true_indices
-            experiment_details["p_true_responses"] = p_true_responses
+            # experiment_details["p_true_responses"] = p_true_responses_for_prompt_construction # Optional: only if needed for debug
             experiment_details["p_true_few_shot_prompt"] = p_true_few_shot_prompt
             logging.info("Finished constructing P(True) few-shot prompt.")
 
     logging.info("=" * 80)
     logging.info("Generating answers...")
     logging.info("=" * 80)
-
-    results_dict = {}
 
     for dataset_split in ["train", "validation"]:
         logging.info(f"\n--- Processing split: {dataset_split} ---")
@@ -161,10 +152,12 @@ def generate_answers(args):
 
         if args.answerable_only and dataset_split == "validation":
             logging.info("Filtering validation set for answerable questions only.")
-            validation_dataset = [
-                ds for ds in validation_dataset if len(ds["answers"]["text"]) > 0
+            # Re-filter the actual validation dataset object being used
+            current_dataset = [
+                ds for ds in current_dataset if len(ds["answers"]["text"]) > 0
             ]
-            possible_indices = list(range(len(validation_dataset)))
+            possible_indices = list(range(len(current_dataset))) # Update indices based on filtered list
+
 
         if not possible_indices:
             logging.warning(
@@ -182,8 +175,8 @@ def generate_answers(args):
         experiment_details[dataset_split] = {"indices": indices_to_process}
 
         generations = {}
-        accuracies = []
-        p_trues = []
+        accuracies = [] # Store final binary accuracy for the split average log
+
         annotation_file_handle = None
         if dataset_split == "validation":
             try:
@@ -231,13 +224,9 @@ def generate_answers(args):
                 top_p_val = args.top_p
 
                 try:
-                    predicted_answer, token_log_likelihoods, embedding = model.predict(
-                        local_prompt, temperature, top_p=top_p_val
+                    predicted_answer, token_log_likelihoods, multi_layer_embeddings_dict = model.predict(
+                        local_prompt, temperature, top_p_val
                     )
-                    if embedding is not None and not isinstance(
-                        embedding, torch.Tensor
-                    ):
-                        embedding = torch.tensor(embedding)
 
                 except Exception as e:
                     logging.error(
@@ -245,7 +234,7 @@ def generate_answers(args):
                     )
                     predicted_answer = "[PREDICTION FAILED]"
                     token_log_likelihoods = []
-                    embedding = None
+                    multi_layer_embeddings_dict = None
 
                 loop_type = (
                     "Low-T" if i == 0 else f"High-T ({i}/{args.num_generations})"
@@ -255,7 +244,8 @@ def generate_answers(args):
                     flush=True,
                 )
 
-                acc = 0.0
+                metric_score = 0.0
+                is_correct_label = False
                 compute_acc = args.compute_accuracy_at_all_temps or (i == 0)
                 if (
                     correct_answers_list
@@ -263,23 +253,26 @@ def generate_answers(args):
                     and predicted_answer != "[PREDICTION FAILED]"
                 ):
                     try:
-                        acc = metric(predicted_answer, example, model)
+                        metric_score = metric(predicted_answer, example, model)
+                        is_correct_label = metric_score > args.metric_threshold
                     except Exception as e:
                         logging.error(
                             f"Metric calculation failed for ID {example_id}, iter {i}: {e}"
                         )
-                        acc = 0.0
+                        metric_score = 0.0
+                        is_correct_label = False
 
                 if i == 0:
                     logging.info(
-                        f"ID {example_id}: Low-T Gen='{predicted_answer[:60]}...', Acc={acc:.2f}"
+                        f"ID {example_id}: Low-T Gen='{predicted_answer[:60]}...', {args.metric}_Score={metric_score:.4f}, Correct(>{args.metric_threshold})={is_correct_label}"
                     )
-                    accuracies.append(acc)
+                    accuracies.append(1.0 if is_correct_label else 0.0)
                     most_likely_answer_dict_gen = {
                         "response": predicted_answer,
                         "token_log_likelihoods": token_log_likelihoods,
-                        "embedding": embedding,
-                        "accuracy": float(acc),
+                        "embedding": multi_layer_embeddings_dict,
+                        "accuracy_metric_score": float(metric_score),
+                        "is_correct": is_correct_label
                     }
                     generations[example_id][
                         "most_likely_answer"
@@ -288,13 +281,22 @@ def generate_answers(args):
 
                     most_likely_answer_dict_anno = {
                         "response": predicted_answer,
-                        "accuracy_score": float(acc),
-                        "is_correct": bool(acc > 0.5),
+                        "accuracy_score": float(metric_score),
+                        "is_correct": is_correct_label,
                     }
 
                 else:
-                    full_responses.append(
-                        (predicted_answer, token_log_likelihoods, embedding, float(acc))
+                     high_t_metric_score = 0.0
+                     high_t_is_correct = False
+                     if correct_answers_list and args.compute_accuracy_at_all_temps and predicted_answer != "[PREDICTION FAILED]":
+                         try:
+                            high_t_metric_score = metric(predicted_answer, example, model)
+                            high_t_is_correct = high_t_metric_score > args.metric_threshold
+                         except Exception:
+                             high_t_metric_score = 0.0; high_t_is_correct=False
+
+                     full_responses.append(
+                        (predicted_answer, token_log_likelihoods, multi_layer_embeddings_dict, float(high_t_metric_score))
                     )
 
             generations[example_id]["responses"] = full_responses
@@ -303,19 +305,20 @@ def generate_answers(args):
                 args.compute_p_true
                 and p_true_few_shot_prompt is not None
                 and dataset_split == "validation"
+                and "most_likely_answer" in generations[example_id] # Make sure low-T response exists
             ):
-                if "most_likely_answer" in generations[example_id]:
-                    p_true_score = p_true_utils.calculate_p_true(
-                        model,
-                        question,
-                        generations[example_id]["most_likely_answer"]["response"],
-                        [r[0] for r in full_responses],
-                        p_true_few_shot_prompt,
-                        hint=args.p_true_hint,
-                    )
-                    p_trues.append(p_true_score)
-                else:
-                    p_trues.append(np.nan)
+                 p_true_score = p_true_utils.calculate_p_true(
+                     model,
+                     question,
+                     generations[example_id]["most_likely_answer"]["response"],
+                     [r[0] for r in full_responses],
+                     p_true_few_shot_prompt,
+                     hint=args.p_true_hint,
+                 )
+                 # Store directly in the generations dict for this sample
+                 generations[example_id]['p_true_logprob'] = p_true_score
+            elif dataset_split == "validation":
+                 generations[example_id]['p_true_logprob'] = np.nan # Ensure field exists even if not computed
 
             if dataset_split == "validation" and annotation_file_handle:
                 annotation_record = {
@@ -363,34 +366,14 @@ def generate_answers(args):
         else:
             logging.warning(f"No accuracy scores recorded for {dataset_split} split.")
 
-        if dataset_split == "validation" and args.compute_p_true:
-            if len(p_trues) == len(indices_to_process):
-                results_dict["uncertainty_measures"] = {
-                    "p_false_fixed": [
-                        1.0 - np.exp(p) if not np.isnan(p) else np.nan for p in p_trues
-                    ],
-                    "p_true_logprob": p_trues,
-                }
-                unc_filename = "uncertainty_measures.pkl"
-                unc_filepath = run_output_dir / unc_filename
-                try:
-                    with open(unc_filepath, "wb") as f:
-                        pickle.dump(results_dict, f)
-                    logging.info(f"Saved P(True) results to {unc_filepath}")
-                except Exception as e:
-                    logging.error(
-                        f"Failed to save uncertainty pickle {unc_filepath}: {e}"
-                    )
-            else:
-                logging.error(
-                    f"Length mismatch between p_true scores ({len(p_trues)}) and processed validation samples ({len(indices_to_process)}). Cannot save p_true uncertainty."
-                )
-
     exp_details_filename = "experiment_details.pkl"
     exp_details_filepath = run_output_dir / exp_details_filename
     try:
         if isinstance(experiment_details.get("args"), argparse.Namespace):
             experiment_details["args"] = vars(experiment_details["args"])
+
+        # Remove sensitive or large data not needed downstream from details
+        # experiment_details.pop("p_true_responses", None)
 
         with open(exp_details_filepath, "wb") as f:
             pickle.dump(experiment_details, f)
@@ -403,7 +386,6 @@ def generate_answers(args):
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -423,6 +405,12 @@ if __name__ == "__main__":
     parser.add_argument("--brief_prompt", default="default")
     parser.add_argument("--use_context", action="store_true")
     parser.add_argument("--metric", default="squad")
+    parser.add_argument(
+        "--metric_threshold",
+        type=float,
+        required=True,
+        help="Threshold for the chosen metric (e.g., SQuAD F1, BERTScore F1) to define correctness.",
+    )
     parser.add_argument("--random_seed", type=int, default=123)
     parser.add_argument("--compute_p_true", action="store_true")
     parser.add_argument("--p_true_num_fewshot", type=int, default=20)
@@ -451,6 +439,13 @@ if __name__ == "__main__":
         type=int,
         default=10,
         help="Number of high-temperature generations for SE/P(True) calculation.",
+    )
+    parser.add_argument(
+        "--probe_layers_to_extract",
+        type=int,
+        nargs="+",
+        default=[-1],
+        help="List of layer indices (negative for from_end) to extract embeddings for IS probe.",
     )
 
     args, unknown = parser.parse_known_args()
