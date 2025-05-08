@@ -14,6 +14,21 @@ from src.utils.logging_utils import setup_logger
 from src.utils.utils import load_pickle
 
 def prepare_probe_data(generations_data, metric_threshold):
+    """
+    Prepare the data for training the internal signal probe. This function takes in the full generations data object
+    and a threshold value for the accuracy metric. It will extract the embeddings for each layer specified in the
+    probe config from the generations data and concatenate them into a single tensor. The label for each sample will
+    be set to 1 if the accuracy metric score is above the given threshold, and 0 otherwise.
+
+    Args:
+        generations_data (dict): Full generations data object, with task IDs as keys and task details as values.
+        metric_threshold (float): Threshold value for the accuracy metric. Samples with scores above this threshold
+            will be labeled as 1, and samples with scores below will be labeled as 0.
+
+    Returns:
+        tuple: A tuple containing the list of hidden states tensors, the list of labels, and the list of task IDs.
+            These can be used to train the internal signal probe model.
+    """
     hidden_states_list = []
     labels = []
     task_ids = []
@@ -147,6 +162,21 @@ def prepare_probe_data(generations_data, metric_threshold):
 
 
 def get_classifier(classifier_name, random_seed):
+    """
+    Return a classifier object given its name and random seed.
+
+    Parameters
+    ----------
+    classifier_name : str
+        One of 'logistic', 'svm', or 'random_forest'.
+    random_seed : int
+        The random seed for the classifier.
+
+    Returns
+    -------
+    classifier : object
+        The classifier object.
+    """
     if classifier_name == 'logistic':
         logging.info("Using Logistic Regression classifier.")
         return LogisticRegression(random_state=random_seed, class_weight="balanced", max_iter=2000, solver='liblinear')
@@ -162,6 +192,31 @@ def get_classifier(classifier_name, random_seed):
 
 def run_internal_signal_probe_cv(run_id, base_dir, classifier_type='logistic', n_splits=5, random_seed=42, metric_threshold=0.85):
 
+    """
+    Runs the Internal Signal probe with K-Fold Cross-Validation using the given classifier type.
+    Also trains a final probe model on all valid data.
+
+    Parameters
+    ----------
+    run_id : str
+        Unique identifier for the generation run.
+    base_dir : str
+        Base directory containing the generation data and where output will be written.
+    classifier_type : str
+        One of 'logistic', 'svm', or 'random_forest'. Default is 'logistic'.
+    n_splits : int
+        Number of folds for K-Fold Cross-Validation. Default is 5.
+    random_seed : int
+        Random seed for K-Fold splitting. Default is 42.
+    metric_threshold : float
+        Threshold value for the metric (e.g., accuracy) to be used as the class label.
+        Default is 0.85.
+
+    Returns
+    -------
+    bool
+        True if successful, False if an error occurred.
+    """
     setup_logger()
     run_dir = Path(base_dir)
     logging.info(f"--- Running IS Probe K-Fold CV & Full Prediction for Run: {run_id} using {classifier_type} ---")

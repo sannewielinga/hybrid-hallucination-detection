@@ -416,11 +416,9 @@ class HuggingfaceModel(BaseModel):
         n_generated = token_stop_index - n_input_token
 
         extracted_embeddings_dict = {}
-        all_token_hidden_states = outputs.get("hidden_states") # This might be tuple per token
+        all_token_hidden_states = outputs.get("hidden_states")
 
         if all_token_hidden_states:
-            # Assuming hidden_states is tuple of generated token states,
-            # and each element is a tuple of layer states.
             num_generated_tokens_in_hs = len(all_token_hidden_states)
 
             if num_generated_tokens_in_hs == 0:
@@ -428,13 +426,12 @@ class HuggingfaceModel(BaseModel):
                 for layer_spec_idx in self.probe_layers_to_extract:
                     extracted_embeddings_dict[f"layer_{layer_spec_idx}"] = None
             else:
-                # Index of the last token's states in the tuple
-                last_token_hs_index = -1 # Use negative index for last element
+                last_token_hs_index = -1 
 
                 last_token_all_layer_states = all_token_hidden_states[last_token_hs_index]
 
                 if isinstance(last_token_all_layer_states, tuple):
-                    num_layers_in_output_hs = len(last_token_all_layer_states) # Includes embedding layer + N transformer layers
+                    num_layers_in_output_hs = len(last_token_all_layer_states)
 
                     for layer_spec_idx in self.probe_layers_to_extract:
                         actual_layer_idx_in_tuple = layer_spec_idx
@@ -443,9 +440,7 @@ class HuggingfaceModel(BaseModel):
 
                         if 0 <= actual_layer_idx_in_tuple < num_layers_in_output_hs:
                             layer_embedding_tensor = last_token_all_layer_states[actual_layer_idx_in_tuple]
-                            # Shape should be (batch_size, sequence_length=1, hidden_size) or squeezed
                             if isinstance(layer_embedding_tensor, torch.Tensor):
-                                # Squeeze potential sequence length if it's 1
                                 if layer_embedding_tensor.ndim == 3 and layer_embedding_tensor.shape[1] == 1:
                                      layer_embedding_tensor = layer_embedding_tensor.squeeze(1)
                                 extracted_embeddings_dict[f"layer_{layer_spec_idx}"] = layer_embedding_tensor.cpu()
@@ -920,7 +915,7 @@ def get_metric(metric_name, device="cuda"):
                         predictions=predictions_list,
                         references=references_list,
                         lang="en",
-                        model_type="microsoft/deberta-xlarge-mnli",
+                        model_type="microsoft/deberta-v2-xlarge-mnli",
                         device=device
                     )
                     f1_scores = results.get("f1")

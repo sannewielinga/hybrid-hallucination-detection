@@ -32,14 +32,14 @@ def main(args):
     logging_utils.setup_logger()
     run_dir = Path(args.run_dir)
     run_id = run_dir.name
-    logging.info(f"--- Starting SE & NSE Computation for Run: {run_id} ---")
+    logging.info(f"--- Starting SE & Other Uncertainty Computation for Run: {run_id} ---")
     logging.info(f"Reading inputs from: {run_dir}")
     logging.info(f"Full args received: {args}")
 
     validation_generations_path = run_dir / VALIDATION_GEN_FILE
     validation_generations = utils.load_pickle(validation_generations_path)
     if validation_generations is None:
-        logging.error(f"Failed to load {validation_generations_path}. Cannot compute SE/NSE.")
+        logging.error(f"Failed to load {validation_generations_path}. Cannot compute uncertainties.")
         return
 
     train_generations = None
@@ -70,7 +70,7 @@ def main(args):
             logging.error(f"Failed to load entailment model '{args.entailment_model}': {e}", exc_info=True)
             return
     else:
-        logging.info("Skipping SE, NSE, and other entropy calculations based on args.")
+        logging.info("Skipping SE, NSE, and cluster entropy calculations based on args.")
         entailment_model = None
 
     metric = None
@@ -100,7 +100,11 @@ def main(args):
             logging.info(f"Reached num_eval_samples limit ({args.num_eval_samples}). Stopping.")
             break
 
-        example = validation_generations[tid]
+        example = validation_generations.get(tid)
+        if example is None:
+            logging.warning(f"Could not find data for task ID {tid} in loaded generations. Skipping.")
+            continue
+
         most_likely_answer = example.get("most_likely_answer", {})
 
         metric_score_raw = most_likely_answer.get("accuracy_metric_score")
@@ -110,7 +114,7 @@ def main(args):
             response_text = most_likely_answer.get("response")
             if response_text and response_text != "[PREDICTION FAILED]":
                 try:
-                    metric_score_raw = metric(response_text, example, None)
+                    metric_score_raw = metric(response_text, example, None) # Assumes metric needs model=None if not LLM-based metric
                     is_correct_derived = metric_score_raw > args.metric_threshold
                 except Exception as e:
                     logging.warning(f"Metric recalculation failed for ID {tid}: {e}")
@@ -162,6 +166,14 @@ def main(args):
 
         validation_answerable.append(is_answerable(example))
 
+        p_true_logprob = example.get('p_true_logprob', np.nan)
+        p_false_fixed = 1.0 - np.exp(p_true_logprob) if not pd.isna(p_true_logprob) else np.nan
+        entropies["p_true_logprob"].append(p_true_logprob)
+        entropies["p_false_fixed"].append(p_false_fixed)
+
+        response_length = most_likely_answer.get('response_length', np.nan)
+        entropies["response_length"].append(response_length)
+
         if args.compute_predictive_entropy and entailment_model:
             full_responses = example.get("responses", [])
             log_liks = [r[1] for r in full_responses if isinstance(r, (list, tuple)) and len(r) > 1 and r[1] is not None]
@@ -185,10 +197,11 @@ def main(args):
 
                     log_liks_agg = []
                     for ll_list in log_liks:
-                        if ll_list and all(isinstance(x, (int, float)) for x in ll_list):
+                        if ll_list and all(isinstance(x, (int, float)) and not np.isnan(x) for x in ll_list):
                             log_liks_agg.append(np.mean(ll_list))
                         else:
                             log_liks_agg.append(np.nan)
+
 
                     if not np.isnan(log_liks_agg).any():
                         cluster_entropy_val = cluster_assignment_entropy(semantic_ids)
@@ -228,6 +241,12 @@ def main(args):
             entropies["regular_entropy"].append(regular_entropy_val)
             entropies["cluster_assignment_entropy"].append(cluster_entropy_val)
             result_dict["semantic_ids"].append(semantic_ids_val)
+        elif args.compute_predictive_entropy:
+             entropies["semantic_entropy"].append(np.nan)
+             entropies["normalized_semantic_entropy"].append(np.nan)
+             entropies["regular_entropy"].append(np.nan)
+             entropies["cluster_assignment_entropy"].append(np.nan)
+             result_dict["semantic_ids"].append([])
 
         count += 1
 
@@ -265,7 +284,6 @@ def main(args):
                 if 'layer_-1' in train_emb_data_obj and train_emb_data_obj['layer_-1'] is not None:
                     embedding_for_pik_train = train_emb_data_obj['layer_-1']
                 else:
-                    logging.warning(f"P(IK) Train for {tid_train}: 'layer_-1' missing/None. Fallback needed.")
                     potential_keys_train = [k for k,v in train_emb_data_obj.items() if k.startswith("layer_") and v is not None]
                     if potential_keys_train:
                         try:
@@ -295,29 +313,30 @@ def main(args):
 
         if train_embeddings and validation_embeddings:
             target_len = len(validation_embeddings)
-            if len(result_dict["validation_is_false"]) != target_len:
-                 logging.warning(f"Padding/truncating validation_is_false for P(IK). Expected {target_len}, got {len(result_dict['validation_is_false'])}.")
-                 result_dict["validation_is_false"] = (result_dict["validation_is_false"] + [False] * target_len)[:target_len]
-            if len(result_dict["validation_unanswerable"]) != target_len:
-                 logging.warning(f"Padding/truncating validation_unanswerable for P(IK). Expected {target_len}, got {len(result_dict['validation_unanswerable'])}.")
-                 result_dict["validation_unanswerable"] = (result_dict["validation_unanswerable"] + [False] * target_len)[:target_len]
+
+            padded_val_is_false = (result_dict["validation_is_false"] + [False] * target_len)[:target_len]
+            padded_val_unanswerable = (result_dict["validation_unanswerable"] + [False] * target_len)[:target_len]
+
 
             if args.compute_p_ik:
                 logging.info("Training P(IK) for correctness...")
                 p_ik_preds = get_p_ik(
                     train_embeddings=train_embeddings, is_false=train_is_false,
-                    eval_embeddings=validation_embeddings, eval_is_false=result_dict["validation_is_false"]
+                    eval_embeddings=validation_embeddings, eval_is_false=padded_val_is_false
                 )
-                result_dict["uncertainty_measures"]["p_ik"] = p_ik_preds.tolist() if p_ik_preds is not None else [np.nan] * target_len
+                result_dict["uncertainty_measures"]["p_ik"] = p_ik_preds.tolist() if p_ik_preds is not None else [np.nan] * count
             if args.compute_p_ik_answerable:
                 logging.info("Training P(IK) for answerability...")
                 p_ik_ans_preds = get_p_ik(
                     train_embeddings=train_embeddings, is_false=train_unanswerable,
-                    eval_embeddings=validation_embeddings, eval_is_false=result_dict["validation_unanswerable"]
+                    eval_embeddings=validation_embeddings, eval_is_false=padded_val_unanswerable
                 )
-                result_dict["uncertainty_measures"]["p_ik_unanswerable"] = p_ik_ans_preds.tolist() if p_ik_ans_preds is not None else [np.nan] * target_len
+                result_dict["uncertainty_measures"]["p_ik_unanswerable"] = p_ik_ans_preds.tolist() if p_ik_ans_preds is not None else [np.nan] * count
         else:
             logging.warning("Skipping P(IK) calculation due to missing train or validation embeddings.")
+            if args.compute_p_ik: result_dict["uncertainty_measures"]["p_ik"] = [np.nan] * count
+            if args.compute_p_ik_answerable: result_dict["uncertainty_measures"]["p_ik_unanswerable"] = [np.nan] * count
+
 
     output_path = run_dir / OUTPUT_UNCERTAINTY_FILE
     try:
@@ -339,7 +358,7 @@ def main(args):
 
         with open(output_path, "wb") as f:
             pickle.dump(result_dict, f)
-        logging.info(f"Final uncertainty measures (including NSE) saved to: {output_path}")
+        logging.info(f"Final uncertainty measures saved to: {output_path}")
     except Exception as e:
         logging.error(f"Failed to save final uncertainty measures to {output_path}: {e}", exc_info=True)
 
@@ -353,7 +372,7 @@ def main(args):
         except Exception as cleanup_e:
             logging.warning(f"Could not fully clean up entailment model: {cleanup_e}")
 
-    logging.info(f"--- SE/NSE Computation Stage Complete for Run: {run_id} ---")
+    logging.info(f"--- Uncertainty Computation Stage Complete for Run: {run_id} ---")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute Semantic Entropy and other uncertainty measures.")
@@ -381,6 +400,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--entailment_cache_id", default=None)
     parser.add_argument("--entailment_cache_only", action="store_true", default=False)
+    parser.add_argument("--compute_p_true", action="store_true", default=True)
 
     args, unknown = parser.parse_known_args()
     if unknown:

@@ -113,7 +113,7 @@ def main():
         sys.exit(1)
 
     gen_args_map = { "model_name": {"arg": "--model_name"}, "base_model": {"arg": "--base_model"}, "dataset": {"arg": "--dataset"}, "num_samples": {"arg": "--num_samples"}, "num_few_shot": {"arg": "--num_few_shot"}, "temperature": {"arg": "--temperature"}, "top_p": {"arg": "--top_p"}, "enable_brief": {"arg": "--enable_brief", "is_flag": True}, "brief_prompt": {"arg": "--brief_prompt"}, "use_context": {"arg": "--use_context", "is_flag": True}, "metric": {"arg": "--metric"}, "seed": {"arg": "--random_seed"}, "compute_p_true": {"arg": "--compute_p_true", "is_flag": True}, "p_true_num_fewshot": {"arg": "--p_true_num_fewshot"}, "model_max_new_tokens": {"arg": "--model_max_new_tokens"}, "brief_always": {"arg": "--brief_always", "is_flag": True}, "probe_layers_to_extract": {"arg": "--probe_layers_to_extract"} }
-    se_args_map = { "entailment_model": {"arg": "--entailment_model"}, "strict_entailment": {"arg": "--strict_entailment", "is_flag": True}, "condition_on_question": {"arg": "--condition_on_question", "is_flag": True}, "num_generations": {"arg": "--use_num_generations"}, "use_all_generations_se": {"arg": "--use_all_generations", "is_flag": True}, "num_samples": {"arg": "--num_eval_samples"}, "metric": {"arg": "--metric"}, "recompute_accuracy": {"arg":"--recompute_accuracy", "is_flag": True}, "compute_p_ik": {"arg":"--compute_p_ik", "is_flag": True}, "compute_p_ik_answerable": {"arg":"--compute_p_ik_answerable", "is_flag": True} }
+    se_args_map = { "entailment_model": {"arg": "--entailment_model"}, "strict_entailment": {"arg": "--strict_entailment", "is_flag": True}, "condition_on_question": {"arg": "--condition_on_question", "is_flag": True}, "num_generations": {"arg": "--use_num_generations"}, "use_all_generations_se": {"arg": "--use_all_generations", "is_flag": True}, "num_samples": {"arg": "--num_eval_samples"}, "metric": {"arg": "--metric"}, "recompute_accuracy": {"arg":"--recompute_accuracy", "is_flag": True}, "compute_p_ik": {"arg":"--compute_p_ik", "is_flag": True}, "compute_p_ik_answerable": {"arg":"--compute_p_ik_answerable", "is_flag": True}, "compute_p_true": {"arg": "--compute_p_true", "is_flag": True}, "compute_predictive_entropy": {"arg": "--compute_predictive_entropy", "is_flag": True}}
     is_args_map = {
         "probe_classifier": {"arg": "--classifier"},
         "probe_n_splits": {"arg": "--n_splits"},
@@ -232,7 +232,7 @@ def main():
             if not success: sys.exit(1)
         else:
             logging.error("Skipping prepare_analysis due to missing inputs.")
-            success = False # Treat as failure if annotations expected but missing
+            success = False
 
     if run_flags.get("evaluate_subtypes", False):
         stages_executed.append("evaluate_subtypes")
@@ -247,7 +247,7 @@ def main():
              stage_args.extend(["--plot_dir", str(plot_output_dir_abs)])
              full_args = positional_args + stage_args
              success &= run_stage("evaluate_subtypes", script_path, config, full_args)
-             if not success: sys.exit(1) # Consider if this stage failure is critical
+             if not success: sys.exit(1)
         else:
             logging.warning(f"Input file {analysis_input_file} missing. Skipping evaluate_subtypes.")
 

@@ -20,6 +20,33 @@ from src.utils import logging_utils
 from .compute_se import main as main_compute
 
 def generate_answers(args):
+    """
+    Main function for generating answers for a given dataset, model, and hyperparameters.
+    
+    This function takes an argparse.Namespace object as input, which should contain the following
+    attributes:
+        - output_dir: the directory where generated answers will be saved
+        - dataset: the name of the dataset to generate answers for (e.g. "medquad")
+        - model: the name of the model to use for generation (e.g. "bert-base-uncased")
+        - brief_prompt: whether to use a brief prompt (True) or the full prompt (False)
+        - num_few_shot: the number of few-shot examples to use in the prompt
+        - get_training_set_generations: whether to generate answers for the training set
+        - get_training_set_generations_most_likely_only: whether to only generate the most likely
+            answer for each example in the training set
+        - compute_accuracy_at_all_temps: whether to compute accuracy at all temperatures
+        - compute_p_true: whether to compute P(True) or not
+        - num_generations: the number of generations to produce for each example
+        - temperature: the temperature to use for generation
+        - top_p: the top-p value to use for generation
+        - metric_threshold: the threshold above which an answer is considered correct
+        - p_true_num_fewshot: the number of few-shot examples to use for computing P(True)
+        - p_true_hint: the hint to use when computing P(True)
+        - metric: the metric to use for computing accuracy (e.g. "exact_match")
+    
+    This function will generate answers for the specified dataset and model, and save them to the
+    specified output directory. It will also compute accuracy and P(True) if requested, and save
+    these values to the output directory as well.
+    """
     logging_utils.setup_logger()
     logging.info(f"Starting answer generation with args: {args}")
 
@@ -82,6 +109,10 @@ def generate_answers(args):
     experiment_details["prompt"] = prompt
     experiment_details["BRIEF"] = BRIEF
     logging.info("Few-shot prompt constructed.")
+    logging.info("################################################################################")
+    logging.info(f"Few-shot prompt (first 500 chars):\n{prompt[:500]}...")
+    logging.info("################################################################################")
+
 
     logging.info("Initializing model...")
     model = utils.init_model(args)
@@ -90,7 +121,6 @@ def generate_answers(args):
         return
 
     p_true_few_shot_prompt = None
-    p_true_responses_for_prompt_construction = {} # Store responses used ONLY for prompt construction if needed later
     if args.compute_p_true:
         logging.info("Constructing few-shot prompt for P(True)...")
         available_for_ptrue = list(set(remaining_answerable))
@@ -119,14 +149,17 @@ def generate_answers(args):
                     brief_always=is_brief_always,
                     make_prompt=make_prompt,
                     num_generations=args.num_generations,
-                    metric=lambda pred, ex, mdl: utils.get_metric(args.metric)(pred, ex, mdl) > args.metric_threshold, # Pass a boolean lambda
+                    metric=lambda pred, ex, mdl: utils.get_metric(args.metric)(pred, ex, mdl) > args.metric_threshold,
                     top_p=args.top_p,
                 )
             )
             experiment_details["p_true_indices"] = p_true_indices
-            # experiment_details["p_true_responses"] = p_true_responses_for_prompt_construction # Optional: only if needed for debug
             experiment_details["p_true_few_shot_prompt"] = p_true_few_shot_prompt
             logging.info("Finished constructing P(True) few-shot prompt.")
+            logging.info("################################################################################")
+            logging.info(f"P(True) Few-Shot Prompt:\n{p_true_few_shot_prompt}")
+            logging.info("################################################################################")
+
 
     logging.info("=" * 80)
     logging.info("Generating answers...")
@@ -152,11 +185,10 @@ def generate_answers(args):
 
         if args.answerable_only and dataset_split == "validation":
             logging.info("Filtering validation set for answerable questions only.")
-            # Re-filter the actual validation dataset object being used
             current_dataset = [
                 ds for ds in current_dataset if len(ds["answers"]["text"]) > 0
             ]
-            possible_indices = list(range(len(current_dataset))) # Update indices based on filtered list
+            possible_indices = list(range(len(current_dataset)))
 
 
         if not possible_indices:
@@ -175,7 +207,7 @@ def generate_answers(args):
         experiment_details[dataset_split] = {"indices": indices_to_process}
 
         generations = {}
-        accuracies = [] # Store final binary accuracy for the split average log
+        accuracies = []
 
         annotation_file_handle = None
         if dataset_split == "validation":
@@ -204,10 +236,16 @@ def generate_answers(args):
             example_id = example.get("id", f"{dataset_split}_{index}")
             correct_answers_list = example.get("answers", {}).get("text", [])
 
+            logging.info(f"Iteration {it+1}/{num_to_process}: Processing ID {example_id}")
+            logging.info(f"  Question: {question}")
+            if context: logging.info(f"  Context: {context[:100]}...")
+
             generations[example_id] = {"question": question, "context": context}
 
             current_input = make_prompt(context, question, None, BRIEF, is_brief_always)
             local_prompt = prompt + current_input
+            logging.info(f"  Current Input to Model (last 200 chars): ...{current_input[-200:]}")
+
 
             full_responses = []
             most_likely_answer_dict_anno = {}
@@ -239,9 +277,8 @@ def generate_answers(args):
                 loop_type = (
                     "Low-T" if i == 0 else f"High-T ({i}/{args.num_generations})"
                 )
-                print(
-                    f"  ID {example_id} [{loop_type}]: Generated='{predicted_answer}'",
-                    flush=True,
+                logging.info(
+                    f"  ID {example_id} [{loop_type}]: Generated='{predicted_answer}'"
                 )
 
                 metric_score = 0.0
@@ -255,24 +292,28 @@ def generate_answers(args):
                     try:
                         metric_score = metric(predicted_answer, example, model)
                         is_correct_label = metric_score > args.metric_threshold
+                        logging.info(f"  ID {example_id} [{loop_type}]: Metric '{args.metric}' score={metric_score:.4f} -> Correct={is_correct_label} (Threshold={args.metric_threshold})")
                     except Exception as e:
                         logging.error(
                             f"Metric calculation failed for ID {example_id}, iter {i}: {e}"
                         )
                         metric_score = 0.0
                         is_correct_label = False
+                elif i == 0:
+                     logging.info(f"  ID {example_id} [Low-T]: Correctness calculation skipped (no reference or failed prediction).")
+
 
                 if i == 0:
-                    logging.info(
-                        f"ID {example_id}: Low-T Gen='{predicted_answer[:60]}...', {args.metric}_Score={metric_score:.4f}, Correct(>{args.metric_threshold})={is_correct_label}"
-                    )
+                    logging.info(f"  Correct Answer(s): {correct_answers_list}")
                     accuracies.append(1.0 if is_correct_label else 0.0)
+                    response_length = len(predicted_answer) if predicted_answer != "[PREDICTION FAILED]" else 0
                     most_likely_answer_dict_gen = {
                         "response": predicted_answer,
                         "token_log_likelihoods": token_log_likelihoods,
                         "embedding": multi_layer_embeddings_dict,
                         "accuracy_metric_score": float(metric_score),
-                        "is_correct": is_correct_label
+                        "is_correct": is_correct_label,
+                        "response_length": response_length
                     }
                     generations[example_id][
                         "most_likely_answer"
@@ -305,20 +346,24 @@ def generate_answers(args):
                 args.compute_p_true
                 and p_true_few_shot_prompt is not None
                 and dataset_split == "validation"
-                and "most_likely_answer" in generations[example_id] # Make sure low-T response exists
+                and "most_likely_answer" in generations[example_id]
             ):
-                 p_true_score = p_true_utils.calculate_p_true(
-                     model,
-                     question,
-                     generations[example_id]["most_likely_answer"]["response"],
-                     [r[0] for r in full_responses],
-                     p_true_few_shot_prompt,
-                     hint=args.p_true_hint,
-                 )
-                 # Store directly in the generations dict for this sample
+                 p_true_score = np.nan
+                 try:
+                     p_true_score = p_true_utils.calculate_p_true(
+                         model,
+                         question,
+                         generations[example_id]["most_likely_answer"]["response"],
+                         [r[0] for r in full_responses],
+                         p_true_few_shot_prompt,
+                         hint=args.p_true_hint,
+                     )
+                     logging.info(f"  ID {example_id}: P(True) log probability = {p_true_score:.4f}")
+                 except Exception as ptrue_err:
+                     logging.error(f"  ID {example_id}: P(True) calculation failed: {ptrue_err}")
                  generations[example_id]['p_true_logprob'] = p_true_score
             elif dataset_split == "validation":
-                 generations[example_id]['p_true_logprob'] = np.nan # Ensure field exists even if not computed
+                 generations[example_id]['p_true_logprob'] = np.nan
 
             if dataset_split == "validation" and annotation_file_handle:
                 annotation_record = {
@@ -344,6 +389,7 @@ def generate_answers(args):
                     logging.error(
                         f"Failed to write annotation record for {example_id} to file: {e}"
                     )
+            logging.info("-" * 60)
 
         if annotation_file_handle:
             annotation_file_handle.close()
@@ -366,14 +412,12 @@ def generate_answers(args):
         else:
             logging.warning(f"No accuracy scores recorded for {dataset_split} split.")
 
+
     exp_details_filename = "experiment_details.pkl"
     exp_details_filepath = run_output_dir / exp_details_filename
     try:
         if isinstance(experiment_details.get("args"), argparse.Namespace):
             experiment_details["args"] = vars(experiment_details["args"])
-
-        # Remove sensitive or large data not needed downstream from details
-        # experiment_details.pop("p_true_responses", None)
 
         with open(exp_details_filepath, "wb") as f:
             pickle.dump(experiment_details, f)
