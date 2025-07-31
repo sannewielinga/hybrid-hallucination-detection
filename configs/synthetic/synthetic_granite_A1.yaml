@@ -1,0 +1,58 @@
+run_id: "synth_granite_A1"
+description: "ibm-granite/granite-3.1-1b-a400m-instruct on Synthetic A1 Dosage Task"
+base_output_dir: "./outputs/runs_synthetic"
+
+stages:
+  # Disable regular QA stages for this run
+  generate: false
+  compute_se: false
+  probe_is: false
+  train_hybrid_meta: false
+  calculate_aurocs: false
+  prepare_analysis: false 
+  evaluate_subtypes: false
+
+  # Enable synthetic stages
+  generate_synthetic_dosage_prompts: true
+  generate_synthetic_dosage_answers: true
+  compute_se_on_synthetic: true
+  probe_is_on_synthetic: true
+  train_hybrid_meta_on_synthetic: true 
+  calculate_aurocs_on_synthetic: true
+
+# --- Model for SYNTHETIC ANSWER GENERATION ---
+model_name: "ibm-granite/granite-3.1-1b-a400m-instruct"
+base_model: null 
+model_max_new_tokens: 20 # For high-T SE generations on synthetic data
+model_max_new_tokens_low_t_synthetic: 15 # For the low-T numerical dosage output
+
+# --- General SE & Generation Params (used by synthetic stages if applicable) ---
+seed: 42 
+num_generations: 10 # For SE calculation (on synthetic data)
+temperature_synthetic: 0.8 # Temp for high-T SE generations on synthetic data
+top_p: 0.9 # top_p for high-T SE generations
+
+# --- Entailment for SE (on synthetic data) ---
+entailment_model: "lighteternal/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext-finetuned-mnli"
+strict_entailment: true
+condition_on_question: true # For SE, might be less relevant for dosage Qs but keep for consistency
+
+# --- Internal Signal Probe Configuration (FOR SYNTHETIC DATA) ---
+probe_classifier: "random_forest"     
+probe_n_splits: 5                     
+probe_seed: 42 
+probe_accuracy_threshold: 0.5 
+
+# --- Hybrid Meta-Score Configuration (FOR SYNTHETIC DATA) ---
+meta_classifier: "random_forest" 
+
+# --- Synthetic Prompt Generation Parameters ---
+synthetic_num_per_med: 160 # Number of prompts per medication rule (e.g., 30*3 rules = 90 total)
+synthetic_prompts_filename_template: "dosage_prompts_n{num_per_med}.jsonl" 
+
+# --- Metrics Output for Synthetic ---
+synthetic_metrics_output_json_template: "{run_id}_synthetic_full_set_metrics.json"
+analysis_save_aurac_plots_synthetic: true 
+
+compute_p_ik: false
+compute_p_ik_answerable: false

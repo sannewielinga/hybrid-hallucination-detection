@@ -1,0 +1,68 @@
+run_id: "synth_tinyllama_chat_A2" # Descriptive for A2 synthetic run
+description: "TinyLlama-1.1B-Chat-v1.0 on Synthetic A2 Contraindication Task"
+base_output_dir: "./outputs/runs_synthetic" # Separate base directory for A2 synthetic outputs
+
+stages:
+  # Disable regular QA and A1 synthetic stages for this specific A2 run
+  generate: false
+  compute_se: false
+  probe_is: false
+  train_hybrid_meta: false
+  calculate_aurocs: false
+  prepare_analysis: false 
+  evaluate_subtypes: false
+
+  generate_synthetic_dosage_prompts: false # A1
+  generate_synthetic_dosage_answers: false # A1
+  compute_se_on_synthetic: false           # A1 (will be specific later)
+  probe_is_on_synthetic: false             # A1 (will be specific later)
+  train_hybrid_meta_on_synthetic: false    # A1 (will be specific later)
+  calculate_aurocs_on_synthetic: false     # A1 (will be specific later)
+
+  # Enable A2 synthetic stages
+  generate_synthetic_A2_contra_prompts: true
+  generate_synthetic_A2_contra_answers: true
+  compute_se_on_A2_synthetic: true
+  probe_is_on_A2_synthetic: true
+  train_hybrid_meta_on_A2_synthetic: true 
+  calculate_aurocs_on_A2_synthetic: true
+
+# --- Model for SYNTHETIC A2 ANSWER GENERATION ---
+model_name: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+base_model: null 
+model_max_new_tokens_A2: 10 # For high-T SE generations (e.g., "Safe", "Unsafe", maybe slight variations)
+model_max_new_tokens_low_t_A2_synthetic: 8 # For the low-T "Safe"/"Unsafe" output
+
+# --- General SE & Generation Params (used by A2 synthetic stages) ---
+seed: 42 
+num_generations_A2: 10 # For SE calculation (on A2 synthetic data)
+temperature_a2_synthetic: 0.7 # Temp for high-T SE generations on A2 synthetic data
+top_p: 0.9 # top_p for high-T SE generations
+
+# --- Entailment for SE (on A2 synthetic data) ---
+# Reusing the same entailment model as A1 for consistency, unless you have a reason to change
+entailment_model: "lighteternal/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext-finetuned-mnli"
+strict_entailment: true
+condition_on_question: true 
+
+# --- Internal Signal Probe Configuration (FOR A2 SYNTHETIC DATA) ---
+# These can often be the same as A1, but you might tune them later
+probe_classifier: "random_forest"     
+probe_n_splits: 5                     
+# probe_seed: 42 # Uses global 'seed' if not specified here and if run_experiment.py maps it
+probe_accuracy_threshold: 0.5 # For binarizing "Safe" vs "Unsafe" based on string match
+
+# --- Hybrid Meta-Score Configuration (FOR A2 SYNTHETIC DATA) ---
+meta_classifier: "random_forest" 
+
+# --- Synthetic A2 Prompt Generation Parameters ---
+synthetic_num_per_rule_state_A2: 1 # Number of "Safe" & "Unsafe" prompts per rule (e.g., 160 * 3 rules * 2 states = 960 total)
+synthetic_A2_prompts_filename_template: "A2_contra_prompts_n{num_per_rule_state}.jsonl" 
+
+# --- Metrics Output for A2 Synthetic ---
+synthetic_A2_metrics_output_json_template: "{run_id}_synthetic_A2_metrics.json"
+analysis_save_aurac_plots_A2_synthetic: true 
+
+# --- P(IK) usually disabled for initial synthetic runs without synthetic training data ---
+compute_p_ik: false
+compute_p_ik_answerable: false

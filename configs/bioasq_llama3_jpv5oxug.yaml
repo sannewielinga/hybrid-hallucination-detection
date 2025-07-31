@@ -1,0 +1,57 @@
+run_id: "jpv5oxug"
+description: "Llama-3.2-1B (non-quantized) on BioASQ with specific SE params"
+base_output_dir: "./outputs/runs"
+
+stages:
+  generate: true
+  compute_se: true
+  probe_is: true
+  train_hybrid_meta: true
+  calculate_aurocs: true
+  prepare_analysis: true 
+  evaluate_subtypes: true
+
+dataset: "bioasq"
+model_name: "meta-llama/Llama-3.2-1B"
+model_max_new_tokens: 50
+quantization: null
+
+#--- Generation / SE Configuration (generate.py, compute_se.py) ---
+seed: 10
+num_few_shot: 5
+temperature: 0.8
+top_p: 0.9
+enable_brief: true
+brief_prompt: "default"
+brief_always: false
+use_context: false 
+num_generations: 10
+compute_accuracy_at_all_temps: true 
+metric: "squad" 
+entailment_model: "lighteternal/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext-finetuned-mnli"
+strict_entailment: true
+condition_on_question: true 
+use_all_generations_se: true 
+compute_p_true: true 
+p_true_num_fewshot: 20
+p_true_hint: false 
+
+# --- Internal Signal Probe Configuration (probe.py) ---
+probe_test_size: 0.3
+probe_seed: 42
+probe_accuracy_threshold: 0.5
+
+# --- Data Preparation Configuration (create_analysis_dataset.py) ---
+processed_annotation_dir: "./annotation_data"
+
+# --- Analysis Configuration (evaluate_subtypes.py) ---
+analysis_score_columns:
+  - "semantic_entropy"
+  - "naive_entropy"
+  - "internal_signal_score"
+  - "hybrid_simple_score"
+  - "hybrid_meta_score"
+analysis_min_samples_per_subtype: 2
+analysis_plot_dir_suffix: "subtype_plots_final"
+analysis_save_plots: true
+analysis_save_aurac_plots: true

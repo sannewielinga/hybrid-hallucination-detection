@@ -1,0 +1,101 @@
+stages:
+  - version
+  - build
+  - deploy
+
+variables:
+  IMAGE_NAME: $CI_REGISTRY_IMAGE/design
+  GIT_SUBMODULE_STRATEGY: normal
+  GIT_SUBMODULE_FORCE_HTTPS: 'true'
+
+version-design:
+  stage: version
+  image: node:22-slim
+  script:
+    - cd apps/design
+    - |
+      if [[ "$CI_COMMIT_BRANCH" == "k8s-design-deploy" ]]; then
+        echo "VERSION=$(npm pkg get version | tr -d \")-$CI_COMMIT_SHORT_SHA" >> build.env
+      else
+        echo "VERSION=$(npm pkg get version | tr -d \")" >> build.env
+      fi
+  artifacts:
+    reports:
+      dotenv: apps/design/build.env
+
+build-design:
+  stage: build
+  image: docker:git
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+  services:
+    - name: 'docker:dind'
+  dependencies:
+    - version-design
+  before_script:
+    - echo "Logging in to GitLab Container Registry with CI credentials..."
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  environment:
+    name: design/dev
+    action: prepare
+  script:
+    - echo "Started job ---> build-design"
+    - export CI_APPLICATION_REPOSITORY=${CI_APPLICATION_REPOSITORY:-$CI_REGISTRY_IMAGE/design}
+    - echo "Creating build..."
+    - docker build -f apps/design/Dockerfile --build-arg VERSION=$VERSION --tag "$CI_APPLICATION_REPOSITORY:$VERSION" .
+    - echo "Build created"
+    - docker push "$CI_APPLICATION_REPOSITORY:$VERSION"
+    - echo "Finished job ---> build-design"
+  only:
+    changes:
+      - apps/design/**
+
+deploy_design:
+  stage: deploy
+  dependencies:
+    - version-design
+    - build-design
+  image:
+    name: alpine/k8s:1.32.2
+  variables:
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION_CRISP}
+    NAMESPACE: design
+    ENVIRONMENT: design
+    REPLICAS: 1
+    MAX_UNAVAILABLE: 1
+    MAX_SURGE: 0
+    TGB: eks-design/60d71c8f14df4efe
+  before_script:
+    - echo "Started job ---> deploy-design"
+    - mkdir -p ~/.aws
+    - echo "[default]" > ~/.aws/credentials
+    - echo "aws_access_key_id=$AWS_ACCESS_KEY_ID_EKS" >> ~/.aws/credentials
+    - echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY_EKS" >> ~/.aws/credentials
+    - echo "[default]" > ~/.aws/config
+    - echo "region=$AWS_DEFAULT_REGION_CRISP" >> ~/.aws/config
+    - aws eks update-kubeconfig --name CrispKN01 --region $AWS_DEFAULT_REGION_CRISP
+  script:
+    # - echo "Downloading ${ENVIRONMENT}.env from S3..."
+    # - aws s3 cp s3://crisp-ecs/config/portal/.${ENVIRONMENT}.env .
+    # - echo "Updating Kubernetes secret with latest ${ENVIRONMENT}.env..."
+    # - kubectl delete secret web-secrets -n ${NAMESPACE} || echo "No existing secret found"
+    # - kubectl create secret generic web-secrets --from-env-file=.${ENVIRONMENT}.env -n ${NAMESPACE}
+    - echo "Preparing deployment manifest..."
+    - kubectl cluster-info
+    - export CI_APPLICATION_REPOSITORY="${CI_REGISTRY_IMAGE}/web/crisp"
+    - export CI_APPLICATION_TAG="$VERSION"
+    - export IMAGE_TAG="$CI_APPLICATION_REPOSITORY:$CI_APPLICATION_TAG"
+    - cd apps/web
+    - echo "IMAGE_TAG=$IMAGE_TAG"
+    - echo "ENVIRONMENT=$ENVIRONMENT"
+    - echo "NAMESPACE=$NAMESPACE"
+    - envsubst < deployment.yaml > /tmp/deployment.yaml
+    - echo "Deploying build..."
+    - kubectl apply -f /tmp/deployment.yaml -n $NAMESPACE
+    - cat /tmp/deployment.yaml
+    - echo "Deployed $IMAGE_TAG"
+    - kubectl rollout status deployment/design -n $NAMESPACE
+    - echo "Finished job ---> deploy-design"
+  only:
+    changes:
+      - apps/design/**
