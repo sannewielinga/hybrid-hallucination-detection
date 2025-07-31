@@ -6,8 +6,8 @@
 *** Replace "github_username", "repo_name" etc. with your actual repository details.
 *** Remove or comment out any badges you do not want to display.
 -->
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
+<!-- [![Contributors][contributors-shield]][contributors-url] -->
+<!-- [![Forks][forks-shield]][forks-url] -->
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
 [![project_license][license-shield]][license-url]
@@ -361,6 +361,11 @@ All generated files for a run are stored within `outputs/runs/<run_id>/`.
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
+## License
+
+Distributed under the **MIT License**.  
+See the [LICENSE](./LICENSE) file for details.
+
 <!-- CONTACT -->
 ## Contact
 
@@ -377,10 +382,10 @@ Sanne Wielinga - [LinkedIn](https://www.linkedin.com/in/sanne-wielinga-501914114
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-[contributors-shield]: https://img.shields.io/github/contributors/sannewielinga/hybrid-hallucination-detection.svg?style=for-the-badge
+<!-- [contributors-shield]: https://img.shields.io/github/contributors/sannewielinga/hybrid-hallucination-detection.svg?style=for-the-badge
 [contributors-url]: https://github.com/sannewielinga/hybrid-hallucination-detection/graphs/contributors
 [forks-shield]: https://img.shields.io/github/forks/sannewielinga/hybrid-hallucination-detection.svg?style=for-the-badge
-[forks-url]: https://github.com/sannewielinga/hybrid-hallucination-detection/network/members
+[forks-url]: https://github.com/sannewielinga/hybrid-hallucination-detection/network/members -->
 [stars-shield]: https://img.shields.io/github/stars/sannewielinga/hybrid-hallucination-detection.svg?style=for-the-badge
 [stars-url]: https://github.com/sannewielinga/hybrid-hallucination-detection/stargazers
 [issues-shield]: https://img.shields.io/github/issues/sannewielinga/hybrid-hallucination-detection.svg?style=for-the-badge
@@ -388,5 +393,7 @@ Sanne Wielinga - [LinkedIn](https://www.linkedin.com/in/sanne-wielinga-501914114
 [license-shield]: https://img.shields.io/github/license/sannewielinga/hybrid-hallucination-detection.svg?style=for-the-badge
 [license-url]: https://github.com/sannewielinga/hybrid-hallucination-detection/blob/main/LICENSE.txt
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
-[linkedin-url]: <https://linkedin.com/in/linkedin_username>
+[linkedin-url]: https://www.linkedin.com/in/sanne-wielinga-501914114
 
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
