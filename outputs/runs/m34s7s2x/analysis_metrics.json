@@ -1,0 +1,191 @@
+{
+  "performance": {
+    "accuracy": {
+      "mean": 0.1425,
+      "bootstrap": {
+        "std_err": 0.017462887861188724,
+        "low": 0.1175,
+        "high": 0.1725
+      }
+    }
+  },
+  "uncertainty": {
+    "semantic_entropy": {
+      "AUROC": {
+        "mean": 0.8968594956779704,
+        "bootstrap": {
+          "std_err": 0.02663413232285345,
+          "low": 0.8449380766544279,
+          "high": 0.9348403833392923
+        }
+      },
+      "area_under_thresholded_accuracy": {
+        "mean": 0.29835873233121535,
+        "bootstrap": {
+          "std_err": 0.032508321783305184,
+          "low": 0.2515391034053326,
+          "high": 0.3574705931378751
+        }
+      },
+      "mean_uncertainty": {
+        "mean": 1.9410132506701672,
+        "bootstrap": {
+          "std_err": 0.0313137840501239,
+          "low": 1.8889648407325825,
+          "high": 1.9911049024353051
+        }
+      },
+      "accuracy_at_0.8_answer_fraction": {
+        "mean": 0.175,
+        "bootstrap": {
+          "std_err": 0.021935792103520337,
+          "low": 0.1416449806645797,
+          "high": 0.2125
+        }
+      },
+      "accuracy_at_0.9_answer_fraction": {
+        "mean": 0.15555555555555556,
+        "bootstrap": {
+          "std_err": 0.02017016369320232,
+          "low": 0.125,
+          "high": 0.19166666666666668
+        }
+      },
+      "accuracy_at_0.95_answer_fraction": {
+        "mean": 0.14736842105263157,
+        "bootstrap": {
+          "std_err": 0.018484076415115947,
+          "low": 0.11842105263157894,
+          "high": 0.18097979502177647
+        }
+      },
+      "accuracy_at_1.0_answer_fraction": {
+        "mean": 0.1425,
+        "bootstrap": {
+          "std_err": 0.016847456203549854,
+          "low": 0.1175,
+          "high": 0.1725
+        }
+      }
+    },
+    "semantic_entropy_UNANSWERABLE": {},
+    "regular_entropy": {
+      "AUROC": {
+        "mean": 0.8646616541353385,
+        "bootstrap": {
+          "std_err": 0.03258342676431455,
+          "low": 0.7981526690543356,
+          "high": 0.908028192525673
+        }
+      },
+      "area_under_thresholded_accuracy": {
+        "mean": 0.28228501699583897,
+        "bootstrap": {
+          "std_err": 0.03178302801685179,
+          "low": 0.23100852670194885,
+          "high": 0.33791641723077165
+        }
+      },
+      "mean_uncertainty": {
+        "mean": 1.02772085845843,
+        "bootstrap": {
+          "std_err": 0.014351819576851534,
+          "low": 1.0042236686307537,
+          "high": 1.051093144276893
+        }
+      },
+      "accuracy_at_0.8_answer_fraction": {
+        "mean": 0.16875,
+        "bootstrap": {
+          "std_err": 0.021620627908809212,
+          "low": 0.13707165109034267,
+          "high": 0.20625
+        }
+      },
+      "accuracy_at_0.9_answer_fraction": {
+        "mean": 0.1527777777777778,
+        "bootstrap": {
+          "std_err": 0.018387199891761973,
+          "low": 0.1270718232044199,
+          "high": 0.18611111111111112
+        }
+      },
+      "accuracy_at_0.95_answer_fraction": {
+        "mean": 0.14736842105263157,
+        "bootstrap": {
+          "std_err": 0.018223399980899686,
+          "low": 0.12105263157894737,
+          "high": 0.17894736842105263
+        }
+      },
+      "accuracy_at_1.0_answer_fraction": {
+        "mean": 0.1425,
+        "bootstrap": {
+          "std_err": 0.017105845600370175,
+          "low": 0.1175,
+          "high": 0.1725
+        }
+      }
+    },
+    "regular_entropy_UNANSWERABLE": {},
+    "cluster_assignment_entropy": {
+      "AUROC": {
+        "mean": 0.8912331850033246,
+        "bootstrap": {
+          "std_err": 0.02749660466556159,
+          "low": 0.8354065844964805,
+          "high": 0.9283692590218007
+        }
+      },
+      "area_under_thresholded_accuracy": {
+        "mean": 0.2535579531327537,
+        "bootstrap": {
+          "std_err": 0.030067336200288418,
+          "low": 0.20705465201231626,
+          "high": 0.3045796392697386
+        }
+      },
+      "mean_uncertainty": {
+        "mean": 2.013234582551776,
+        "bootstrap": {
+          "std_err": 0.028632065521239685,
+          "low": 1.9570871327029347,
+          "high": 2.052024813590461
+        }
+      },
+      "accuracy_at_0.8_answer_fraction": {
+        "mean": 0.1425,
+        "bootstrap": {
+          "std_err": 0.0174030533604384,
+          "low": 0.1175,
+          "high": 0.175
+        }
+      },
+      "accuracy_at_0.9_answer_fraction": {
+        "mean": 0.1425,
+        "bootstrap": {
+          "std_err": 0.017457498080745683,
+          "low": 0.115,
+          "high": 0.1725
+        }
+      },
+      "accuracy_at_0.95_answer_fraction": {
+        "mean": 0.1425,
+        "bootstrap": {
+          "std_err": 0.018177018395428544,
+          "low": 0.115,
+          "high": 0.1725
+        }
+      },
+      "accuracy_at_1.0_answer_fraction": {
+        "mean": 0.1425,
+        "bootstrap": {
+          "std_err": 0.017453243522608037,
+          "low": 0.115,
+          "high": 0.1725
+        }
+      }
+    },
+    "cluster_assignment_entropy_UNANSWERABLE": {}
+  }
+}
