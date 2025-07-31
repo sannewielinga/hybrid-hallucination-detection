@@ -391,7 +391,7 @@ Sanne Wielinga - [LinkedIn](https://www.linkedin.com/in/sanne-wielinga-501914114
 [issues-shield]: https://img.shields.io/github/issues/sannewielinga/hybrid-hallucination-detection.svg?style=for-the-badge
 [issues-url]: https://github.com/sannewielinga/hybrid-hallucination-detection/issues
 [license-shield]: https://img.shields.io/github/license/sannewielinga/hybrid-hallucination-detection.svg?style=for-the-badge
-[license-url]: https://github.com/sannewielinga/hybrid-hallucination-detection/blob/main/LICENSE.txt
+[license-url]: https://github.com/sannewielinga/hybrid-hallucination-detection/blob/main/LICENSE
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
 [linkedin-url]: https://www.linkedin.com/in/sanne-wielinga-501914114
 
