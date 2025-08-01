@@ -153,7 +153,7 @@ if __name__ == "__main__":
             
             if not success_current_run:
                 overall_success = False
-                failed_configs_list.append(config_file_path_original.name) # Log original name for failures
+                failed_configs_list.append(config_file_path_original.name)
                 logging.warning(f"Continuing to next config despite failure in {config_file_path_original.name}")
             
 

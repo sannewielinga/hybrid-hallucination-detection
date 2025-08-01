@@ -2,10 +2,6 @@ import sys
 import os
 import textwrap
 
-# --- Configuration ---
-
-# 1. PASTE YOUR FULL LLM PROMPT TEMPLATE HERE
-# Use placeholders like {question}, {context}, {reference_answers}, {generated_answer}
 PROMPT_TEMPLATE = """
 You are an expert AI assistant specializing in analyzing and classifying errors (hallucinations) made by other language models in the medical domain. Your goal is to provide the **MOST specific and accurate classification** based on the provided taxonomy and a rigorous step-by-step process.
 
@@ -58,17 +54,9 @@ You are an expert AI assistant specializing in analyzing and classifying errors 
 **Rationale:** [Follow instructions in Step 4 above.]
 """
 
-# --- Optional: Local Model Integration ---
-# Set this to True if you want to try using a local transformers model
 USE_LOCAL_MODEL = False
-# If USE_LOCAL_MODEL is True, specify your model name/path here
-# Make sure you have transformers, torch, accelerate etc. installed
-# Example: LOCAL_MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-# Example: LOCAL_MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.1"
-LOCAL_MODEL_NAME = "cognitivecomputations/TinyDolphin-2.8-1.1b" # Change this to your model
-MAX_NEW_TOKENS = 250 # Max tokens for the LLM's response (code + rationale)
-
-# --- Helper Functions ---
+LOCAL_MODEL_NAME = "cognitivecomputations/TinyDolphin-2.8-1.1b" 
+MAX_NEW_TOKENS = 250
 
 def clear_screen():
     """Clears the terminal screen."""
@@ -84,7 +72,7 @@ def get_multiline_input(prompt):
             if line == "":
                 break
             lines.append(line)
-        except EOFError: # Handles Ctrl+D
+        except EOFError:
              break
     return "\n".join(lines)
 
@@ -106,19 +94,14 @@ if USE_LOCAL_MODEL:
         from transformers import pipeline, AutoTokenizer
         import torch
         print(f"Loading tokenizer: {LOCAL_MODEL_NAME}")
-        # Some models might need trust_remote_code=True
         tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_NAME)
         print(f"Loading pipeline for: {LOCAL_MODEL_NAME}")
-        # Adjust device as needed (-1 for CPU, 0 for GPU 0, etc.)
-        # Add `torch_dtype=torch.float16` or bfloat16 for memory saving if needed
-        # May need `trust_remote_code=True` for some models like Falcon
         pipe = pipeline(
             "text-generation",
             model=LOCAL_MODEL_NAME,
             tokenizer=tokenizer,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16, # Use bfloat16 if available
-            device_map="auto", # Automatically use GPU if available
-            # trust_remote_code=True # Uncomment if needed for your model
+            torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+            device_map="auto",
         )
         print("Local model loaded successfully.")
         local_model_loaded = True
@@ -127,13 +110,13 @@ if USE_LOCAL_MODEL:
         print("--- Please install it (`pip install transformers torch accelerate`) ---")
         print("--- Continuing without local model integration. ---")
         local_model_loaded = False
-        USE_LOCAL_MODEL = False # Disable if import fails
+        USE_LOCAL_MODEL = False
     except Exception as e:
         print(f"\n--- ERROR loading local model {LOCAL_MODEL_NAME}: {e} ---")
         print("--- Check model name/path and dependencies. ---")
         print("--- Continuing without local model integration. ---")
         local_model_loaded = False
-        USE_LOCAL_MODEL = False # Disable if model loading fails
+        USE_LOCAL_MODEL = False
 
 while True:
     clear_screen()
@@ -143,19 +126,12 @@ while True:
     details['question'] = input("Question: ")
     if details['question'].lower() == 'quit': break
 
-    # details['context'] = input("Context (leave blank if none, type 'None Provided' if explicit): ")
-    # if details['context'].lower() == 'quit': break
-    # if details['context'] == "": details['context'] = "None Provided" # Standardize
-
-    # Use multiline input helper for potentially long answers
     details['reference_answers'] = get_multiline_input("Correct/Reference Answer(s)")
-    # Check for quit signal within multiline input (though less likely)
     if details['reference_answers'].lower().strip() == 'quit': break
 
     details['generated_answer'] = get_multiline_input("Incorrect Generated Answer")
     if details['generated_answer'].lower().strip() == 'quit': break
 
-    # Format the prompt
     full_prompt = format_prompt(PROMPT_TEMPLATE, details)
 
     print("\n" + "="*80)
@@ -168,25 +144,18 @@ while True:
         print(f"--- Attempting classification with local model: {LOCAL_MODEL_NAME} ---")
         print("--- Please wait... ---")
         try:
-            # Adjust generation parameters as needed
-            # Some models respond better to different terminators or stopping criteria
             outputs = pipe(
                 full_prompt,
                 max_new_tokens=MAX_NEW_TOKENS,
-                do_sample=False, # Turn off sampling for more deterministic classification
-                # temperature=0.1, # Low temperature for less randomness
-                # top_k=10,
-                # top_p=0.95,
-                return_full_text=False, # Only return the generated part
-                # Add stopping criteria if needed for your model, e.g.:
-                # eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=pipe.tokenizer.eos_token_id # Suppress warning
+                do_sample=False,
+                return_full_text=False,
+                pad_token_id=pipe.tokenizer.eos_token_id
             )
             llm_response = outputs[0]['generated_text']
             print("\n" + "-"*80)
             print("--- Local LLM Response ---")
             print("-"*80)
-            print(textwrap.fill(llm_response, width=80)) # Wrap long lines
+            print(textwrap.fill(llm_response, width=80))
             print("-"*80 + "\n")
             print("--- Please review this suggestion carefully before using it. ---")
 
